@@ -1,0 +1,12 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+pydantic-settings==2.5.2
+sqlalchemy==2.0.35
+ollama==0.3.3
+streamlit==1.54.0
+python-dotenv==1.0.1
+requests==2.32.3
+sqlparse==0.5.1
+pytest==8.3.3
+faster-whisper==1.1.0

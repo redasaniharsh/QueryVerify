@@ -1,0 +1,42 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: qv-backend
+    environment:
+      # Reach Ollama running natively on the Windows host (not in a container).
+      OLLAMA_HOST: http://host.docker.internal:11434
+      PYTHONUNBUFFERED: "1"
+    extra_hosts:
+      # Defensive: Windows/macOS Docker Desktop resolves host.docker.internal
+      # automatically, Linux needs this explicit host-gateway mapping.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Bind-mount the local data dir so sample.db persists across container
+      # restarts (never wiped when the container stops/recreates).
+      - ./data:/app/data
+    expose:
+      - "8000"
+    ports:
+      # Published for direct reachability / debugging; the frontend talks to the
+      # backend over the internal Docker network by service name.
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: qv-frontend
+    depends_on:
+      - backend
+    environment:
+      # Frontend container reaches the backend by Docker DNS name.
+      QV_API_URL: http://backend:8000/ask
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      # Shared with the backend so the chat-history SQLite DB (written by the
+      # frontend) also persists across container restarts.
+      - ./data:/app/data
+    ports:
+      - "8501:8501"

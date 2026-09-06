@@ -1,0 +1,13 @@
+.git
+.gitignore
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.env
+docs
+tests
+*.log
+edge_suite_payloads*.jsonl
+edge_suite_*.log
+*.png

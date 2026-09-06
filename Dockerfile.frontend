@@ -1,0 +1,19 @@
+# Frontend container: Streamlit chat UI. Talks to the backend service over the
+# Docker network (QV_API_URL set in docker-compose.yml); Whisper transcription
+# runs in-process here (CPU).
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY frontend/ frontend/
+COPY .streamlit/ .streamlit/
+
+EXPOSE 8501
+
+# --server.headless=true disables the Streamlit email prompt on first run.
+CMD ["streamlit", "run", "frontend/streamlit_app.py", \
+     "--server.port", "8501", "--server.address", "0.0.0.0", \
+     "--server.headless", "true"]

@@ -16,6 +16,7 @@ import hashlib
 import io
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -23,6 +24,7 @@ import urllib.parse
 from pathlib import Path
 
 import faster_whisper
+import pandas as pd
 import requests
 import streamlit as st
 
@@ -561,6 +563,107 @@ def _confidence_pill(label, score):
     )
 
 
+# --------------------------------------------------------------------------
+# Automatic result visualization. Only renders when the result table has a
+# clean, chartable shape; a chart is never forced onto data it doesn't fit.
+# --------------------------------------------------------------------------
+
+_YEAR_RE = re.compile(r"^\d{4}$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?)?$")
+
+
+def _coerce_number(value):
+    """float(value) for int/float/numeric-string values, else None (bool off)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.strip().replace(",", "").replace("$", "").replace(" ", "")
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+    return None
+
+
+def _all_numbers(rows, col):
+    values = [r.get(col) for r in rows]
+    non_empty = [v for v in values if v is not None and v != ""]
+    if not non_empty:
+        return False
+    return all(_coerce_number(v) is not None for v in non_empty)
+
+
+def _all_dates(rows, col):
+    values = [r.get(col) for r in rows]
+    non_empty = [v for v in values if v is not None and v != ""]
+    if not non_empty:
+        return False
+    return all(
+        isinstance(v, str)
+        and (_YEAR_RE.fullmatch(v.strip()) or _DATE_RE.fullmatch(v.strip()))
+        for v in non_empty
+    )
+
+
+def _chart_plan(rows):
+    """Decide whether/how to visualize a result table.
+
+    Returns ("bar"|"line", x_col, y_col) or None when the table does not
+    warrant a chart:
+      * fewer than 2 rows        -> None (one number is not a chart)
+      * anything but 2 columns   -> None (don't force a shape onto it)
+      * date + number, 2+ rows   -> ("line", date_col, number_col)
+      * category + number, 2+ rows -> ("bar", category_col, number_col)
+      * number + number (or any other pairing) -> None
+    """
+    if not rows or len(rows) < 2:
+        return None
+    columns = list(rows[0].keys())
+    if len(columns) != 2:
+        return None
+
+    def _is_value_col(col):
+        # A date-like column is an axis (trend), never a chartable value.
+        return _all_numbers(rows, col) and not _all_dates(rows, col)
+
+    value_cols = [c for c in columns if _is_value_col(c)]
+    if len(value_cols) != 1:
+        return None
+    y = value_cols[0]
+    x = columns[1] if columns[0] == y else columns[0]
+
+    if _all_dates(rows, x):
+        return "line", x, y
+    if not _all_numbers(rows, x):
+        return "bar", x, y
+    return None
+
+
+def _render_chart(data):
+    """Render a chart for a successful answer, when the result shape fits.
+
+    Placed between the results dataframe and the confidence pill. The
+    'Visualized:' label makes clear this is auto-generated from the same
+    rows shown above, not a separate artifact.
+    """
+    rows = (data.get("result") or {}).get("rows") or []
+    plan = _chart_plan(rows)
+    if plan is None:
+        return
+    kind, x_col, y_col = plan
+    df = pd.DataFrame(rows)
+    if kind == "line":
+        df = df.copy()
+        df[x_col] = pd.to_datetime(df[x_col])
+    st.caption("_Visualized:_")
+    if kind == "bar":
+        st.bar_chart(df, x=x_col, y=y_col)
+    else:
+        st.line_chart(df, x=x_col, y=y_col)
+
+
 def _render_answer(data):
     translated = data.get("translated_question")
     if translated:
@@ -584,6 +687,8 @@ def _render_answer(data):
         st.dataframe(rows, width="stretch")
     else:
         st.info("No rows returned.")
+
+    _render_chart(data)
 
     label = data.get("confidence", "low")
     score = data.get("confidence_score", 0.0)

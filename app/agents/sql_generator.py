@@ -32,6 +32,10 @@ deterministic secondary sort key after the primary one — typically the \
 relevant ID column — so that ties produce a consistent, repeatable order. \
 For example: ORDER BY total_sales DESC, customer_id ASC.
 
+Do NOT add a LIMIT clause unless the question explicitly asks for a specific \
+number of results (e.g., "top 5", "the highest", "first 3"). A "by X" \
+breakdown question wants ALL groups, not just one.
+
 When a question filters by a per-entity count or aggregate BEFORE a further \
 aggregation (e.g. 'customers who placed more than N orders', then average \
 something about those customers), use a subquery or CTE that first computes \

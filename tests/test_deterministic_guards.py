@@ -14,6 +14,11 @@ What's covered:
   * Absent-entity guard                     -- app.agents.orchestrator
       absent_entity(): names a topic that is not in this schema, so no SQL is
       silently fabricated around it.
+  * 'by X' breakdown row-count guard        -- app.agents.repair_loop
+      _breakdown_suspicion(): a full-breakdown question (by country/category/...)
+      whose result is suspiciously short of the dimension's group count is the
+      accidental-LIMIT blind spot; _check_consistency() caps confidence at medium
+      when such a result reaches the self-consistency step.
   * Syntax / import blow-up check           -- py_compile of app/ and frontend/,
       plus importing app.main and the guard modules (catches syntax errors and
       broken imports immediately on every push).
@@ -30,6 +35,7 @@ import pytest
 
 from app.agents.executor import is_read_only, execute_sql
 from app.agents.orchestrator import has_destructive_intent, absent_entity
+from app.agents import repair_loop
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -159,6 +165,124 @@ def test_absent_entity_detects_non_schema_topics(question, expected):
 )
 def test_absent_entity_ignores_schema_topics(question):
     assert absent_entity(question) is None
+
+
+# --------------------------------------------------------------------------
+# 'by X' breakdown row-count guard (app.agents.repair_loop)
+# --------------------------------------------------------------------------
+# DB-free: _expected_group_count is monkeypatched so no engine is touched.
+
+_TRUE_COUNTS = {"country": 7, "category": 5, "subcategory": 37, "product_line": 5}
+
+
+def _patch_counts(monkeypatch):
+    monkeypatch.setattr(repair_loop, "_expected_group_count", lambda engine, col: _TRUE_COUNTS.get(col))
+
+
+def test_breakdown_suspicion_flags_single_row_by_country(monkeypatch):
+    _patch_counts(monkeypatch)
+    assert repair_loop._breakdown_suspicion(
+        "What is the total sales amount by country?", 1, engine=None
+    ) == ("country", 7)
+
+
+def test_breakdown_suspicion_silent_when_all_groups_present(monkeypatch):
+    _patch_counts(monkeypatch)
+    assert repair_loop._breakdown_suspicion(
+        "What is the total sales amount by country?", 7, engine=None
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What is the total sales amount by category?",
+        "Show sales per product subcategory",
+        "Total revenue for each country",
+        "What is the average order value grouped by product line?",
+    ],
+)
+def test_breakdown_suspicion_detects_breakdown_phrasing(monkeypatch, question):
+    _patch_counts(monkeypatch)
+    assert repair_loop._breakdown_suspicion(question, 1, engine=None) is not None
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        # 'by customers in Germany' is a join filter, not a country breakdown.
+        "What is the total sales amount for road bike products bought by customers in Germany?",
+        "Which product category grew the fastest between 2012 and 2013?",
+        "What were the total sales in 2013?",
+        "Show me the top customers",
+        "Compare total sales between road bikes and mountain bikes.",
+        "What is the total employee salary?",
+        "How many customers are in australia",
+    ],
+)
+def test_breakdown_suspicion_silent_without_breakdown_phrasing(monkeypatch, question):
+    _patch_counts(monkeypatch)
+    assert repair_loop._breakdown_suspicion(question, 1, engine=None) is None
+
+
+def test_consistency_does_not_execute_sql_when_nothing_to_compare(monkeypatch):
+    # A question with no breakdown phrasing at all must not reach the guard.
+    _patch_counts(monkeypatch)
+    assert repair_loop._breakdown_suspicion("How many customers are there?", 1, engine=None) is None
+
+
+# --------------------------------------------------------------------------
+# Consistency cap when a suspiciously short breakdown agrees anyway
+# --------------------------------------------------------------------------
+
+_LIMIT1_SQL = (
+    "SELECT c.country, SUM(s.sales_amount) AS total_sales FROM fact_sales s "
+    "JOIN dim_customers c ON s.customer_key = c.customer_key "
+    "GROUP BY c.country ORDER BY total_sales DESC LIMIT 1"
+)
+_ONE_ROW = {
+    "success": True,
+    "columns": ["country", "total_sales"],
+    "rows": [{"country": "United States", "total_sales": 9162327}],
+}
+
+
+def test_consistency_caps_high_score_when_short_breakdown_agrees(monkeypatch):
+    # All 3 samples agree on the WRONG (LIMIT 1) answer; the new cap must keep
+    # this at medium instead of awarding a 1.0 "high" from consistent errors.
+    monkeypatch.setattr(repair_loop, "_expected_group_count", lambda engine, col: 7)
+    monkeypatch.setattr(repair_loop, "generate_sql", lambda *a, **k: _LIMIT1_SQL)
+    monkeypatch.setattr(repair_loop, "execute_sql", lambda sql, engine: dict(_ONE_ROW))
+    score, note = repair_loop._check_consistency(
+        "What is the total sales amount by country?",
+        schema_context="fake schema",
+        engine=None,
+        original_result=dict(_ONE_ROW),
+    )
+    assert score == 2 / 3
+    assert "capped" in note
+    assert "incomplete" in note
+    assert "7 groups" in note
+
+
+def test_consistency_no_cap_when_breakdown_not_suspicious(monkeypatch):
+    # A full 7-row breakdown that agrees everywhere stays at full score.
+    monkeypatch.setattr(repair_loop, "_expected_group_count", lambda engine, col: 7)
+    monkeypatch.setattr(repair_loop, "generate_sql", lambda *a, **k: _LIMIT1_SQL)
+    rows7 = {
+        "success": True,
+        "columns": ["country", "total_sales"],
+        "rows": [{"country": f"C{i}", "total_sales": 1000 + i} for i in range(7)],
+    }
+    monkeypatch.setattr(repair_loop, "execute_sql", lambda sql, engine: dict(rows7))
+    score, note = repair_loop._check_consistency(
+        "What is the total sales amount by country?",
+        schema_context="fake schema",
+        engine=None,
+        original_result=dict(rows7),
+    )
+    assert score == 1.0
+    assert "capped" not in note
 
 
 # --------------------------------------------------------------------------

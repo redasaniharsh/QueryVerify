@@ -3,6 +3,10 @@ Ties generation + execution + verification together into the retry loop,
 with self-consistency cross-check on first verified match.
 """
 
+import re
+
+from sqlalchemy import inspect, text
+
 from app.config import settings
 from app.agents.sql_generator import generate_sql
 from app.agents.executor import execute_sql
@@ -11,6 +15,84 @@ from app.llm.ollama_client import LLMTimeoutError
 
 
 _ID_SUFFIXES = ("_id", "_key", "_number", "_code", "_sku", "_no")
+
+# "by X" breakdown detection: which dimension columns form the groups of a full
+# breakdown question, and (via _expected_group_count) how many groups each has.
+_DIM_COLUMN = {
+    "product category": "category",
+    "product subcategory": "subcategory",
+    "product line": "product_line",
+    "marital status": "marital_status",
+    "product name": "product_name",
+    "category": "category",
+    "categories": "category",
+    "subcategory": "subcategory",
+    "subcategories": "subcategory",
+    "country": "country",
+    "countries": "country",
+    "gender": "gender",
+    "product": "product_name",
+    "products": "product_name",
+}
+
+_BREAKDOWN_DIM_RE = re.compile(
+    r"\b(?:(?:(?:grouped|broken)\s+)?(?:by|per)|(?:for\s+)?each)\s+"
+    r"(product category|product subcategory|product line|marital status|"
+    r"product name|category|categories|subcategory|subcategories|"
+    r"country|countries|gender|product|products)\b",
+    re.IGNORECASE,
+)
+
+_DISTINCT_GROUP_CACHE: dict[tuple[str, str], int] = {}
+
+
+def _table_owning_column(engine, column: str) -> str | None:
+    """First table that owns a column with this name (schema-internal names only)."""
+    inspector = inspect(engine)
+    for table in inspector.get_table_names():
+        if column in {c["name"].lower() for c in inspector.get_columns(table)}:
+            return table
+    return None
+
+
+def _expected_group_count(engine, column: str) -> int | None:
+    """How many groups a 'by <column>' breakdown should produce, read once from
+    the dimension table that owns the column and cached per (table, column)."""
+    table = _table_owning_column(engine, column)
+    if table is None:
+        return None
+    key = (table, column)
+    if key not in _DISTINCT_GROUP_CACHE:
+        with engine.connect() as conn:
+            n = conn.execute(
+                text(
+                    f'SELECT COUNT(DISTINCT COALESCE("{column}", \'Unknown\')) '
+                    f'FROM "{table}"'
+                )
+            ).scalar()
+        _DISTINCT_GROUP_CACHE[key] = int(n or 0)
+    return _DISTINCT_GROUP_CACHE[key]
+
+
+def _breakdown_suspicion(question: str, result_rows: int, engine) -> tuple[str, int] | None:
+    """Return (grouping_column, expected_group_count) when the question asks for a
+    full 'by X' breakdown but the result has significantly fewer rows than the
+    dimension allows (the accidental-LIMIT signature), else None. Fires only when
+    the row count is well below the expected group count, so legitimate filtered
+    subsets that still return most groups are left alone."""
+    q = question.lower()
+    m = _BREAKDOWN_DIM_RE.search(q)
+    if not m:
+        return None
+    col = _DIM_COLUMN.get(m.group(1).lower())
+    if col is None:
+        return None
+    expected = _expected_group_count(engine, col)
+    if expected is None or expected < 2:
+        return None
+    if result_rows < max(2, expected // 2):
+        return col, expected
+    return None
 
 
 def _is_id_column(name: str) -> bool:
@@ -119,6 +201,17 @@ def _check_consistency(question: str, schema_context: str, engine, original_resu
         f"Cross-checked against {settings.self_consistency_samples} candidates; "
         f"{agreement_count} agreed."
     )
+    actual_rows = len(original_result.get("rows", []))
+    susp = _breakdown_suspicion(question, actual_rows, engine)
+    if susp:
+        col, expected = susp
+        if score >= 0.8:
+            score = 2 / settings.self_consistency_samples
+        note += (
+            f" Answer may be incomplete: roughly {expected} groups are expected by "
+            f"{col}, yet only {actual_rows} row(s) returned, so confidence is capped "
+            f"at medium even though {agreement_count} candidate(s) agreed."
+        )
     if dropped:
         note += f" {dropped} candidate sample(s) could not be produced after retries."
     return score, note
@@ -152,6 +245,16 @@ def run_pipeline(question: str, schema_context: str, engine) -> dict:
 
         if not result["success"]:
             error_feedback = result["error"]
+            continue
+
+        susp = _breakdown_suspicion(question, len(result.get("rows", [])), engine)
+        if susp:
+            col, expected = susp
+            error_feedback = (
+                f"Expected roughly {expected} groups for the '{col}' breakdown, but "
+                f"the query returned only {len(result.get('rows', []))} row(s). Did "
+                f"you accidentally add a LIMIT? Remove it and return ALL groups."
+            )
             continue
 
         verification = verify_result(question, sql, result)

@@ -553,6 +553,18 @@ _CONF_ICONS = {"high": "✓", "medium": "⚠", "low": "✕"}
 _USER_AVATAR = "🧑"
 _ASSISTANT_AVATAR = _LOGO_URL
 
+_TRACE_ICONS = {
+    "guard": "⛔",
+    "absent_entity": "🔍",
+    "schema_read": "📖",
+    "ambiguity": "❓",
+    "generation": "✏️",
+    "execution": "▶️",
+    "verification": "✅",
+    "consistency": "🔄",
+    "final": "🎯",
+}
+
 
 def _confidence_pill(label, score):
     icon = _CONF_ICONS.get(label, "✕")
@@ -561,6 +573,23 @@ def _confidence_pill(label, score):
         f"{score:.0%} confidence</span>",
         unsafe_allow_html=True,
     )
+
+
+def _render_trace(data):
+    """Collapsed expandable timeline of what the pipeline did for this answer."""
+    trace = data.get("trace") or []
+    if not trace:
+        return
+    with st.expander("Show how this was answered", expanded=False):
+        for entry in trace:
+            step = entry.get("step", "")
+            detail = entry.get("detail", "")
+            dur = entry.get("duration_s", 0)
+            icon = _TRACE_ICONS.get(step, "•")
+            if step == "verification" and "Rejected" in detail:
+                icon = "❌"
+            dur_txt = f" · {dur:.1f}s" if dur >= 0.05 else ""
+            st.markdown(f"{icon} {detail}{dur_txt}")
 
 
 # --------------------------------------------------------------------------
@@ -671,9 +700,11 @@ def _render_answer(data):
 
     if data.get("blocked"):
         st.error(data.get("explanation", "Blocked by the read-only guard."))
+        _render_trace(data)
         return
     if not data.get("success"):
         st.error(data.get("explanation", "Could not answer this question."))
+        _render_trace(data)
         return
 
     sql = data.get("sql")
@@ -698,6 +729,8 @@ def _render_answer(data):
     if explanation:
         st.caption(explanation)
 
+    _render_trace(data)
+
 
 def _render_message(msg):
     role = "assistant" if msg["role"] == "assistant" else "user"
@@ -708,6 +741,7 @@ def _render_message(msg):
         elif msg["kind"] == "flag":
             st.markdown(msg["content"])
             st.caption("_You can answer the follow-up below — no need to retype the original question._")
+            _render_trace(msg.get("data") or {})
         elif msg["kind"] == "answer":
             _render_answer(msg["data"])
         else:
@@ -818,6 +852,7 @@ if prompt:
                 "kind": "flag",
                 "content": data["clarifying_question"],
                 "pending_question": full_question,
+                "data": data,
             }
             st.session_state.messages[msg_index] = flag_msg
             _persist_message(flag_msg)

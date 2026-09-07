@@ -4,6 +4,7 @@ with self-consistency cross-check on first verified match.
 """
 
 import re
+from time import perf_counter
 
 from sqlalchemy import inspect, text
 
@@ -12,6 +13,7 @@ from app.agents.sql_generator import generate_sql
 from app.agents.executor import execute_sql
 from app.agents.verifier import verify_result
 from app.llm.ollama_client import LLMTimeoutError
+from app.utils.trace import add as trace_add
 
 
 _ID_SUFFIXES = ("_id", "_key", "_number", "_code", "_sku", "_no")
@@ -161,11 +163,12 @@ def _identity_key(all_columns: list[set]) -> str | None:
     return candidates[0] if candidates else None
 
 
-def _check_consistency(question: str, schema_context: str, engine, original_result: dict) -> tuple[float, str]:
+def _check_consistency(question: str, schema_context: str, engine, original_result: dict, trace: list | None = None) -> tuple[float, str]:
     """Generate additional samples and compare the ranked entities (id or
     group-by label + numeric values). A candidate whose SQL fails to execute
     is retried with repair feedback before it counts as a non-agreeing sample.
     Returns (score, note)."""
+    t0 = perf_counter()
     candidates = []
     dropped = 0
     while len(candidates) < settings.self_consistency_samples - 1:
@@ -214,6 +217,7 @@ def _check_consistency(question: str, schema_context: str, engine, original_resu
         )
     if dropped:
         note += f" {dropped} candidate sample(s) could not be produced after retries."
+    trace_add(trace, "consistency", note[:200], perf_counter() - t0)
     return score, note
 
 
@@ -225,7 +229,7 @@ def _score_to_label(score: float) -> str:
     return "low"
 
 
-def run_pipeline(question: str, schema_context: str, engine) -> dict:
+def run_pipeline(question: str, schema_context: str, engine, trace: list | None = None) -> dict:
     """Run the generate -> execute -> verify loop with repair attempts."""
     error_feedback = ""
     sql = ""
@@ -233,15 +237,51 @@ def run_pipeline(question: str, schema_context: str, engine) -> dict:
     verification = {}
 
     for attempt in range(settings.max_repair_attempts):
+        t0 = perf_counter()
         try:
             sql = generate_sql(
                 question, schema_context, error_feedback, temperature=0.2
             )
         except LLMTimeoutError as exc:
+            trace_add(
+                trace,
+                "generation",
+                f"Attempt {attempt + 1}: generation timed out — retrying",
+                perf_counter() - t0,
+            )
             error_feedback = str(exc)
             continue
+        gen_dur = perf_counter() - t0
+        if error_feedback:
+            trace_add(
+                trace,
+                "generation",
+                f"Attempt {attempt + 1} (repaired): generated SQL — previous "
+                f"failure: {error_feedback[:100]}",
+                gen_dur,
+            )
+        else:
+            trace_add(
+                trace, "generation", f"Attempt {attempt + 1}: generated SQL", gen_dur
+            )
 
+        t0 = perf_counter()
         result = execute_sql(sql, engine)
+        exec_dur = perf_counter() - t0
+        if result["success"]:
+            trace_add(
+                trace,
+                "execution",
+                f"Executed — {len(result.get('rows') or [])} row(s)",
+                exec_dur,
+            )
+        else:
+            trace_add(
+                trace,
+                "execution",
+                f"Failed — {(result.get('error') or '')[:120]}",
+                exec_dur,
+            )
 
         if not result["success"]:
             error_feedback = result["error"]
@@ -257,11 +297,18 @@ def run_pipeline(question: str, schema_context: str, engine) -> dict:
             )
             continue
 
+        t0 = perf_counter()
         verification = verify_result(question, sql, result)
-
+        ver_dur = perf_counter() - t0
         if verification["matches"]:
+            trace_add(
+                trace,
+                "verification",
+                f"Accepted — {(verification['reason'] or '')[:160]}",
+                ver_dur,
+            )
             confidence_score, consistency_note = _check_consistency(
-                question, schema_context, engine, result
+                question, schema_context, engine, result, trace
             )
             explanation = verification["reason"]
             if consistency_note:
@@ -277,6 +324,12 @@ def run_pipeline(question: str, schema_context: str, engine) -> dict:
                 "explanation": explanation,
             }
 
+        trace_add(
+            trace,
+            "verification",
+            f"Rejected — {(verification['reason'] or '')[:160]}",
+            ver_dur,
+        )
         error_feedback = verification["reason"]
         if result.get("success"):
             rows_preview = str(result.get("rows", [])[:3])

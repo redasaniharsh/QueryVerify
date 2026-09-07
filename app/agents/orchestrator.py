@@ -12,10 +12,12 @@ Entry point the API calls. Order of operations:
 """
 
 import re
+from time import perf_counter
 
 from app.db.schema_introspector import get_schema_context
 from app.agents.ambiguity_checker import check_ambiguity, translate_question
 from app.agents.repair_loop import run_pipeline
+from app.utils.trace import add as trace_add
 
 DESTRUCTIVE_RE = re.compile(
     r"\b(delete|drop|truncate|update|insert|alter|remove|wipe|erase|destroy|modify)\b",
@@ -48,7 +50,11 @@ def absent_entity(question: str) -> str | None:
 
 
 def handle_question(question: str, engine) -> dict:
-    """Full pipeline: guard -> schema -> ambiguity check -> generate/execute/verify."""
+    """Full pipeline: guard -> schema -> ambiguity check -> generate/execute/verify.
+
+    Collects a step-by-step trace (schema, ambiguity, generation, execution,
+    verification, consistency, final confidence) that every response carries so
+    the UI can show how the answer was produced."""
     lang, gloss = translate_question(question)
     lang_meta = {"detected_language": lang, "translated_question": gloss}
 
@@ -66,6 +72,14 @@ def handle_question(question: str, engine) -> dict:
                 "Blocked by the read-only guard: destructive action detected in "
                 "the question, rejected before any LLM or database call."
             ),
+            "trace": [
+                {
+                    "step": "guard",
+                    "detail": "Blocked — destructive intent detected before any "
+                    "LLM or database call",
+                    "duration_s": 0.0,
+                }
+            ],
             **lang_meta,
         }
 
@@ -77,24 +91,64 @@ def handle_question(question: str, engine) -> dict:
                 f"This database has no '{missing}' data — it only contains "
                 "customers, products, and sales. Did you mean sales orders?"
             ),
+            "trace": [
+                {
+                    "step": "absent_entity",
+                    "detail": f"Schema check — '{missing}' is not a table or column "
+                    "in this database",
+                    "duration_s": 0.0,
+                }
+            ],
             **lang_meta,
         }
 
-    schema_context = get_schema_context(engine)
-    ambiguity = check_ambiguity(question, schema_context)
+    trace: list = []
 
+    t0 = perf_counter()
+    schema_context = get_schema_context(engine)
+    trace_add(
+        trace,
+        "schema_read",
+        f"Read {schema_context.count('Table: ')} tables from the database",
+        perf_counter() - t0,
+    )
+
+    t0 = perf_counter()
+    ambiguity = check_ambiguity(question, schema_context)
     if ambiguity.get("ambiguous"):
+        trace_add(
+            trace,
+            "ambiguity",
+            f"Ambiguous — {(ambiguity.get('clarifying_question') or '')[:120]}",
+            perf_counter() - t0,
+        )
         return {
             "needs_clarification": True,
             "clarifying_question": ambiguity["clarifying_question"],
+            "trace": trace,
             **lang_meta,
         }
+
+    cols = ambiguity.get("columns")
+    if cols:
+        col_str = ", ".join(f"{tbl}.{col}" for tbl, col in cols)
+    else:
+        col_str = "resolved by classification rules"
+    trace_add(trace, "ambiguity", f"Clear — {col_str}", perf_counter() - t0)
 
     hint = ambiguity.get("schema_hint")
     if hint:
         schema_context = schema_context + "\n\n" + hint
 
-    result = run_pipeline(question, schema_context, engine)
+    result = run_pipeline(question, schema_context, engine, trace)
+    score = result.get("confidence_score")
+    label = result.get("confidence")
+    if score is not None:
+        trace_add(trace, "final", f"{label} confidence ({score:.2f})", 0.0)
+    else:
+        trace_add(trace, "final", "No confidence assigned", 0.0)
+
     result["needs_clarification"] = False
+    result["trace"] = trace
     result.update(lang_meta)
     return result

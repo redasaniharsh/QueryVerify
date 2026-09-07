@@ -24,3 +24,4 @@ class AnswerResponse(BaseModel):
     blocked: Optional[bool] = None
     detected_language: Optional[str] = None
     translated_question: Optional[str] = None
+    trace: list = []

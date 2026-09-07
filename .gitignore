@@ -6,3 +6,4 @@ data/*.db
 .streamlit/
 .pytest_cache/
 *.log
+shots/

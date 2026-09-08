@@ -284,6 +284,10 @@ _CSS = """
 .sb-hdr{font-size:11px; font-weight:700; text-transform:uppercase;
   letter-spacing:.09em; color:var(--qv-muted); margin:16px 4px 6px;}
 .sb-emptystate{font-size:12px; color:var(--qv-muted); margin:2px 4px 8px;}
+.sb-feedback{font-size:12px; color:var(--qv-muted); margin:2px 4px 8px;}
+.sb-feedback b{color:var(--qv-text); font-weight:800;}
+.feedback-thanks{font-size:12px; color:var(--qv-muted); margin:4px 2px 2px;}
+.feedback-thumbs [data-testid="stButton"] button{padding:2px 10px; font-size:14px;}
 [data-testid="stSidebar"] button{
   background:rgba(96,165,250,.06); color:var(--qv-accent-2);
   border:1px solid rgba(96,165,250,.35); border-radius:10px;
@@ -361,7 +365,7 @@ def _persist_message(msg):
         )
         cid = chat_history.create_conversation(title)
         st.session_state.conv_id = cid
-    chat_history.save_message(cid, msg)
+    msg["message_id"] = chat_history.save_message(cid, msg)
 
 
 with st.sidebar:
@@ -400,6 +404,16 @@ with st.sidebar:
                 chat_history.delete_conversation(cid)
             _new_chat()
             st.rerun()
+
+    _feedback_stats = chat_history.feedback_stats()
+    if _feedback_stats["total"] > 0:
+        _helpful_pct = round(100 * _feedback_stats["ups"] / _feedback_stats["total"])
+        st.markdown("---")
+        st.markdown(
+            f'<div class="sb-feedback"><b>{_helpful_pct}%</b> of rated answers '
+            "marked helpful</div>",
+            unsafe_allow_html=True,
+        )
 
 
 @st.cache_resource
@@ -732,6 +746,32 @@ def _render_answer(data):
     _render_trace(data)
 
 
+def _render_feedback(msg):
+    """Small 👍/👎 rating below a successful answer. Encourages a single vote:
+    once a rating is recorded (session or DB), the buttons are replaced by a
+    one-line confirmation and cannot be clicked again."""
+    msg_id = msg.get("message_id")
+    if not msg_id:
+        return
+    if msg.get("feedback"):
+        st.markdown(
+            '<div class="feedback-thanks">Thanks for the feedback</div>',
+            unsafe_allow_html=True,
+        )
+        return
+    col_up, col_down = st.columns([1, 1])
+    with col_up:
+        if st.button("👍", key=f"qv_fb_{msg_id}_up", help="Helpful"):
+            chat_history.set_feedback(msg_id, "up")
+            msg["feedback"] = "up"
+            st.rerun()
+    with col_down:
+        if st.button("👎", key=f"qv_fb_{msg_id}_down", help="Not helpful"):
+            chat_history.set_feedback(msg_id, "down")
+            msg["feedback"] = "down"
+            st.rerun()
+
+
 def _render_message(msg):
     role = "assistant" if msg["role"] == "assistant" else "user"
     avatar = _ASSISTANT_AVATAR if role == "assistant" else _USER_AVATAR
@@ -744,6 +784,8 @@ def _render_message(msg):
             _render_trace(msg.get("data") or {})
         elif msg["kind"] == "answer":
             _render_answer(msg["data"])
+            if (msg.get("data") or {}).get("success") and msg.get("message_id"):
+                _render_feedback(msg)
         else:
             st.error(msg["content"])
 
@@ -868,3 +910,5 @@ if prompt:
             st.session_state.messages[msg_index] = answer_msg
             _persist_message(answer_msg)
             _render_answer(data)
+            if data.get("success") and answer_msg.get("message_id"):
+                _render_feedback(answer_msg)

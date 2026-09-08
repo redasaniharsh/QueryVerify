@@ -33,7 +33,9 @@ CREATE TABLE IF NOT EXISTS messages (
     confidence_score REAL,
     explanation TEXT,
     payload TEXT NOT NULL,
-    timestamp TEXT NOT NULL
+    timestamp TEXT NOT NULL,
+    feedback TEXT,
+    feedback_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
 """
@@ -56,6 +58,15 @@ def _connect():
     return conn
 
 
+def _migrate(conn):
+    """Add feedback columns to pre-existing databases created before feedback."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}
+    if "feedback" not in cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN feedback TEXT")
+    if "feedback_at" not in cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN feedback_at TEXT")
+
+
 def _now():
     return _dt.datetime.now().isoformat(timespec="seconds")
 
@@ -65,7 +76,42 @@ def init_db():
         conn = _connect()
         try:
             conn.executescript(_SCHEMA)
+            _migrate(conn)
             conn.commit()
+        finally:
+            conn.close()
+
+
+def set_feedback(message_id: int, value: str) -> bool:
+    """Record an up/down rating on a message. Returns True when recorded."""
+    if value not in ("up", "down"):
+        return False
+    init_db()
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                "UPDATE messages SET feedback = ?, feedback_at = ? WHERE id = ?",
+                (value, _now(), message_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
+def feedback_stats() -> dict:
+    """Aggregate up/down ratings across all conversations."""
+    init_db()
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS total, "
+                "COALESCE(SUM(CASE WHEN feedback = 'up' THEN 1 ELSE 0 END), 0) AS ups "
+                "FROM messages WHERE feedback IS NOT NULL"
+            ).fetchone()
+            return {"total": row["total"], "ups": row["ups"]}
         finally:
             conn.close()
 
@@ -100,7 +146,7 @@ def create_conversation(title: str) -> int:
             conn.close()
 
 
-def save_message(conv_id: int, msg: dict) -> None:
+def save_message(conv_id: int, msg: dict) -> int:
     init_db()
     payload = json.dumps(msg, ensure_ascii=False)
     kind = msg.get("kind", "")
@@ -115,7 +161,7 @@ def save_message(conv_id: int, msg: dict) -> None:
     with _lock:
         conn = _connect()
         try:
-            conn.execute(
+            cur = conn.execute(
                 "INSERT INTO messages (conversation_id, role, kind, content, sql, "
                 "result, confidence, confidence_score, explanation, payload, timestamp) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -126,6 +172,7 @@ def save_message(conv_id: int, msg: dict) -> None:
                 "UPDATE conversations SET updated_at = ? WHERE id = ?", (ts, conv_id)
             )
             conn.commit()
+            return cur.lastrowid
         finally:
             conn.close()
 
@@ -146,23 +193,28 @@ def list_conversations() -> list[dict]:
 
 def _payload_to_message(row: sqlite3.Row) -> dict:
     try:
-        return json.loads(row["payload"])
+        msg = json.loads(row["payload"])
     except (TypeError, ValueError):
-        pass
-    kind = row["kind"]
-    if kind == "answer":
-        return {
-            "role": row["role"],
-            "kind": "answer",
-            "data": {
-                "sql": row["sql"],
-                "result": json.loads(row["result"]) if row["result"] else None,
-                "confidence": row["confidence"],
-                "confidence_score": row["confidence_score"],
-                "explanation": row["explanation"],
-            },
-        }
-    return {"role": row["role"], "kind": kind, "content": row["content"]}
+        msg = None
+    if msg is None:
+        kind = row["kind"]
+        if kind == "answer":
+            msg = {
+                "role": row["role"],
+                "kind": "answer",
+                "data": {
+                    "sql": row["sql"],
+                    "result": json.loads(row["result"]) if row["result"] else None,
+                    "confidence": row["confidence"],
+                    "confidence_score": row["confidence_score"],
+                    "explanation": row["explanation"],
+                },
+            }
+        else:
+            msg = {"role": row["role"], "kind": kind, "content": row["content"]}
+    msg["message_id"] = row["id"]
+    msg["feedback"] = row["feedback"]
+    return msg
 
 
 def load_messages(conv_id: int) -> list[dict]:

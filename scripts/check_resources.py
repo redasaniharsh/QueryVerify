@@ -23,7 +23,9 @@ import time
 import psutil
 
 from app.config import settings
-from app.db.connection import engine
+from app.db.connection import get_engine
+
+engine = get_engine()
 from app.agents.orchestrator import handle_question
 
 QUESTION = "What is the total sales amount by country?"

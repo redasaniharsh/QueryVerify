@@ -8,6 +8,10 @@ from pydantic import BaseModel
 
 class QuestionRequest(BaseModel):
     question: str
+    # Which database to answer against. None -> the fixed sample dataset.
+    # Otherwise a bare file name like "user_upload_<session_id>.db" (resolved
+    # by the backend inside its data/ directory).
+    database: Optional[str] = None
 
 
 class AnswerResponse(BaseModel):

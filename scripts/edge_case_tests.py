@@ -21,7 +21,9 @@ import sys
 import traceback
 from time import perf_counter
 
-from app.db.connection import engine
+from app.db.connection import get_engine
+
+engine = get_engine()
 from app.agents.executor import is_read_only
 import app.agents.orchestrator as orch
 

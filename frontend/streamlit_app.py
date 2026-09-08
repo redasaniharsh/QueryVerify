@@ -17,6 +17,8 @@ import io
 import logging
 import os
 import re
+import secrets
+import sqlite3
 import sys
 import threading
 import time
@@ -38,6 +40,14 @@ import chat_history  # local module: SQLite persistence for conversations
 # Backend endpoint. Overridable (QV_API_URL) so the containerized frontend can
 # reach the backend service by Docker DNS name (http://backend:8000/ask).
 API_URL = os.environ.get("QV_API_URL", "http://127.0.0.1:8000/ask")
+
+# Bring-your-own-data: uploaded CSVs are loaded into a NEW, separate SQLite file
+# per browser session (data/user_upload_<session_id>.db). The sample DB is never
+# touched. Files are temporary: replaced on a new upload and swept once they are
+# older than UPLOAD_TTL_SECONDS (the browser tab is the only real lifecycle).
+_UPLOAD_DIR = Path(__file__).resolve().parent.parent / "data"
+UPLOAD_MAX_BYTES = int(os.environ.get("QV_UPLOAD_MAX_MB", "50")) * 1024 * 1024
+UPLOAD_TTL_SECONDS = int(os.environ.get("QV_UPLOAD_TTL_HOURS", "2")) * 3600
 
 # Whisper model size for local transcription (small/base are fast enough for
 # short clips on CPU; "small" transcribes Hindi far better than "base").
@@ -332,6 +342,16 @@ if "conv_id" not in st.session_state:
     st.session_state.conv_id = None
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "qv_session_id" not in st.session_state:
+    st.session_state["qv_session_id"] = secrets.token_hex(4)
+if "qv_db_mode" not in st.session_state:
+    st.session_state["qv_db_mode"] = "Sample Data"
+if "qv_db_path" not in st.session_state:
+    st.session_state["qv_db_path"] = None
+if "qv_db_schema" not in st.session_state:
+    st.session_state["qv_db_schema"] = None
+if "qv_upload_sig" not in st.session_state:
+    st.session_state["qv_upload_sig"] = None
 
 
 def _new_chat():
@@ -366,6 +386,113 @@ def _persist_message(msg):
         cid = chat_history.create_conversation(title)
         st.session_state.conv_id = cid
     msg["message_id"] = chat_history.save_message(cid, msg)
+
+
+class UserUploadError(Exception):
+    """Raised when an uploaded file fails validation or cannot be loaded."""
+
+
+def _sanitize_table_name(name: str) -> str:
+    """Filename stem -> a safe SQLite table name (lowercase, [a-z0-9_])."""
+    stem = Path(name).stem.lower()
+    stem = re.sub(r"[^a-z0-9_]", "_", stem)
+    stem = re.sub(r"_+", "_", stem).strip("_")
+    if not stem:
+        stem = "data"
+    if stem[0].isdigit():
+        stem = "t_" + stem
+    return stem
+
+
+def _sweep_uploads(max_age_s: float, keep: Path | None = None) -> None:
+    """Delete session-only upload databases older than max_age_s. Never touches
+    the file currently in use (keep) and never the sample DB."""
+    if not _UPLOAD_DIR.exists():
+        return
+    now = time.time()
+    keep_resolved = Path(keep).resolve() if keep else None
+    for f in _UPLOAD_DIR.glob("user_upload_*.db"):
+        if keep_resolved and f.resolve() == keep_resolved:
+            continue
+        try:
+            if now - f.stat().st_mtime > max_age_s:
+                f.unlink()
+        except OSError:
+            pass  # file in use / already gone; harmless
+
+
+def _build_uploaded_db(files) -> tuple[Path, list]:
+    """Validate + load uploaded CSVs into this session's private SQLite file.
+
+    Returns (db_path, schema) where schema is [(table, [cols], row_count)].
+    On any error raises UserUploadError; the previous upload (if any) is kept
+    untouched until the new set is fully built.
+    """
+    if not files:
+        raise UserUploadError("No files selected.")
+
+    loaded = []  # (table_name, DataFrame) — parse everything BEFORE writing
+    for uploaded_file in files:
+        fname = uploaded_file.name
+        if not fname.lower().endswith(".csv"):
+            raise UserUploadError(f"{fname}: only CSV files are supported.")
+        if (uploaded_file.size or 0) > UPLOAD_MAX_BYTES:
+            raise UserUploadError(
+                f"{fname}: file is too large "
+                f"(max {UPLOAD_MAX_BYTES // (1024 * 1024)} MB)."
+            )
+        try:
+            df = pd.read_csv(io.BytesIO(uploaded_file.getvalue()))
+        except Exception as exc:
+            raise UserUploadError(f"Could not parse {fname}: {exc}")
+        if df.shape[1] == 0:
+            raise UserUploadError(f"{fname}: the CSV has no columns.")
+        loaded.append((_sanitize_table_name(fname), df))
+
+    db_path = _UPLOAD_DIR / f"user_upload_{st.session_state['qv_session_id']}.db"
+    _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    db_path.unlink(missing_ok=True)  # replace this session's previous build
+
+    conn = sqlite3.connect(str(db_path), timeout=30)
+    try:
+        for table_name, df in loaded:
+            df.to_sql(table_name, conn, index=False, if_exists="replace")
+        conn.commit()
+    except sqlite3.Error as exc:
+        raise UserUploadError(f"Could not write uploaded data to SQLite: {exc}")
+    finally:
+        conn.close()
+
+    schema = [(table_name, list(df.columns), len(df)) for table_name, df in loaded]
+    _sweep_uploads(UPLOAD_TTL_SECONDS, keep=db_path)
+    return db_path, schema
+
+
+def _render_schema_block(schema) -> None:
+    """Compact 'what can I ask about' list after a successful upload."""
+    lines = ['<div class="sb-emptystate"><b>Uploaded schema:</b></div>']
+    for table_name, cols, n_rows in schema:
+        cols_txt = ", ".join(cols) if cols else "(no columns)"
+        lines.append(
+            f'<div class="sb-emptystate">• <code>{table_name}</code> '
+            f"({cols_txt}) &middot; {n_rows} rows</div>"
+        )
+    st.markdown("\n".join(lines), unsafe_allow_html=True)
+
+
+def _active_database() -> str | None:
+    """Which database the current session's questions target (None = sample)."""
+    if (
+        st.session_state.get("qv_db_mode") == "My Uploaded Data"
+        and st.session_state.get("qv_db_path")
+    ):
+        return Path(st.session_state["qv_db_path"]).name
+    return None
+
+
+if not st.session_state.get("_qv_swept_once"):
+    _sweep_uploads(UPLOAD_TTL_SECONDS)
+    st.session_state["_qv_swept_once"] = True
 
 
 with st.sidebar:
@@ -414,6 +541,61 @@ with st.sidebar:
             "marked helpful</div>",
             unsafe_allow_html=True,
         )
+
+    st.markdown("---")
+    st.markdown(
+        '<div class="sb-hdr">Use your own data</div>',
+        unsafe_allow_html=True,
+    )
+    st.file_uploader(
+        "Upload CSV file(s)",
+        type=["csv"],
+        accept_multiple_files=True,
+        key="qv_csv_upload",
+        help=(
+            "Load your own CSV data to ask questions about it. One SQLite table "
+            "is created per file, named after the file. The sample dataset is "
+            "never modified."
+        ),
+    )
+    _uploaded_files = st.session_state.get("qv_csv_upload")
+    if _uploaded_files:
+        _sig = [(f.name, f.size) for f in _uploaded_files]
+        if _sig != st.session_state["qv_upload_sig"]:
+            try:
+                _db_path, _schema = _build_uploaded_db(_uploaded_files)
+                st.session_state["qv_db_path"] = str(_db_path)
+                st.session_state["qv_db_schema"] = _schema
+                st.session_state["qv_upload_sig"] = _sig
+                st.session_state["qv_db_mode"] = "My Uploaded Data"
+                st.success(
+                    f"Loaded {len(_schema)} table(s) from "
+                    f"{len(_uploaded_files)} file(s)."
+                )
+            except UserUploadError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"Failed to load uploaded data: {exc}")
+
+    _have_upload = st.session_state.get("qv_db_path") is not None
+    st.radio(
+        "Data source",
+        ["Sample Data", "My Uploaded Data"],
+        key="qv_db_mode",
+        disabled=not _have_upload,
+        help=(
+            "Which database questions are routed to. Sample Data is the fixed "
+            "demo dataset; My Uploaded Data is this session's temporary file."
+        ),
+    )
+    if _have_upload:
+        st.markdown(
+            '<div class="sb-emptystate">Session-only: the file lives in '
+            "data/ and is deleted when replaced by a new upload or once it "
+            "goes stale after the tab closes.</div>",
+            unsafe_allow_html=True,
+        )
+        _render_schema_block(st.session_state["qv_db_schema"])
 
 
 @st.cache_resource
@@ -528,12 +710,22 @@ def _call_backend(question):
     holder = st.empty()
     done = threading.Event()
     bucket = {}
+    database = _active_database()
 
     def _post():
         try:
-            resp = requests.post(API_URL, json={"question": question}, timeout=300)
+            payload = {"question": question}
+            if database:
+                payload["database"] = database
+            resp = requests.post(API_URL, json=payload, timeout=300)
+            if resp.status_code != 200:
+                try:
+                    detail = resp.json().get("detail", resp.text)
+                except Exception:
+                    detail = resp.text
+                raise RuntimeError(f"Backend error ({resp.status_code}): {detail}")
             bucket["resp"] = resp
-        except Exception as exc:  # network/down server, not an API error
+        except Exception as exc:  # network/down server, or a 4xx with detail
             bucket["exc"] = exc
         finally:
             done.set()

@@ -89,7 +89,8 @@ def handle_question(question: str, engine) -> dict:
             "needs_clarification": True,
             "clarifying_question": (
                 f"This database has no '{missing}' data — it only contains "
-                "customers, products, and sales. Did you mean sales orders?"
+                "the tables shown in the sidebar schema. Ask about those, "
+                "or upload a CSV with the data you want to query."
             ),
             "trace": [
                 {

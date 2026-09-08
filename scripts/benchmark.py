@@ -3,7 +3,9 @@ Benchmark harness: baseline (one-shot generate + execute, no verification)
 vs. the full QueryVerify pipeline (handle_question) across 10 test questions.
 """
 
-from app.db.connection import engine
+from app.db.connection import get_engine
+
+engine = get_engine()
 from app.db.schema_introspector import get_schema_context
 from app.agents.sql_generator import generate_sql
 from app.agents.executor import execute_sql

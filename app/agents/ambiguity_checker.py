@@ -363,11 +363,16 @@ def _resolve_metric(question: str, schema_tables: dict[str, list[str]]) -> Optio
     if not _METRIC_RE.search(ql):
         return None
 
+    # Only consider tables that actually exist in THIS schema. The resolver is
+    # anchored on the demo vocabulary, but every candidate must be a real table
+    # in the connected database (a user-uploaded DB never inherits demo facts).
+    present = set(schema_tables.keys())
+
     # entity
     entity_tables: list[str] = []
     seen = set()
     for tok, tbl in _ENTITY_TABLES.items():
-        if tok in ql and tbl not in seen:
+        if tbl in present and tok in ql and tbl not in seen:
             entity_tables.append(tbl)
             seen.add(tbl)
 
@@ -385,13 +390,28 @@ def _resolve_metric(question: str, schema_tables: dict[str, list[str]]) -> Optio
     else:
         metric_tables = entity_tables
 
-    search_tables = metric_tables or list(_TABLE_METRICS.keys())
+    search_tables = [
+        t for t in (metric_tables or list(_TABLE_METRICS.keys())) if t in present
+    ]
     by_concept: dict[str, set] = {}
     for tbl in search_tables:
         metrics = _TABLE_METRICS.get(tbl, {})
         for met_tok, cols in metrics.items():
             if met_tok in ql:
                 by_concept.setdefault(met_tok, set()).update((tbl, c) for c in cols)
+
+    # Generic fallback for any schema: when a metric word literally names a
+    # column that exists in the actual tables (e.g. "price" column in a user
+    # upload), resolve to it directly. Demo columns never collide with this
+    # (sales_amount != "amount", order_number != "order", ...), so the sample
+    # behavior stays byte-identical: "price" still resolves to two columns.
+    metric_vocab = {tok for tbl_metrics in _TABLE_METRICS.values() for tok in tbl_metrics}
+    for met_tok in metric_vocab:
+        if met_tok in ql:
+            for tbl, cols in schema_tables.items():
+                for col in cols:
+                    if col.lower() == met_tok:
+                        by_concept.setdefault(met_tok, set()).add((tbl, col))
 
     if not by_concept:
         return None

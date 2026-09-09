@@ -315,6 +315,24 @@ _CSS = """
 .stDataFrame{background:rgba(255,255,255,.02); border-radius:12px;
   margin:6px 0 2px;}
 .stAlert{border-radius:12px;}
+/* Keep the sidebar expanded at all viewport widths. Streamlit 1.54
+   auto-collapses the sidebar (translateX(-100%) + 1px) when the window is
+   approx <=770px wide (docked DevTools / split screen). Collapse is applied
+   by swapping an emotion class on stSidebar, so an !important override on the
+   stable data-testid selector beats it and survives re-renders. */
+[data-testid="stSidebar"][data-testid="stSidebar"][data-testid="stSidebar"]{
+  width:300px !important; max-width:300px !important; min-width:300px !important;
+  transform:none !important; visibility:visible !important;
+  margin-right:0 !important;}
+[data-testid="stSidebar"] [data-testid="stSidebarContent"][data-testid="stSidebarContent"][data-testid="stSidebarContent"]{
+  width:100% !important; max-width:100% !important; min-width:100% !important;}
+/* At the widths where Streamlit would auto-collapse, keep the fixed input pill
+   and mic inside the area right of the never-collapsed 300px sidebar. */
+@media (max-width: 770px){
+  [data-testid="stForm"]{
+    width:min(440px, calc(100vw - 336px));
+    transform:translateX(calc(-50% + 150px));}
+}
 </style>
 """.replace("__PATTERN__", _PATTERN_URL)
 

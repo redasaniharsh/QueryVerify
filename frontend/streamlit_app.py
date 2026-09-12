@@ -13,6 +13,7 @@ in .streamlit/config.toml. No application logic lives in the CSS.
 """
 
 import hashlib
+import html
 import io
 import logging
 import os
@@ -36,6 +37,7 @@ _FRONTEND_DIR = Path(__file__).resolve().parent
 if str(_FRONTEND_DIR) not in sys.path:
     sys.path.insert(0, str(_FRONTEND_DIR))
 import chat_history  # local module: SQLite persistence for conversations
+import upload_profiler  # local module: data-driven PK/FK detection for uploads
 
 # Backend endpoint. Overridable (QV_API_URL) so the containerized frontend can
 # reach the backend service by Docker DNS name (http://backend:8000/ask).
@@ -310,22 +312,48 @@ _CSS = """
 [data-testid="stSidebar"] button[kind="secondary"]:hover{
   background:rgba(96,165,250,.08); color:#fff;}
 [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p{line-height:1.5;}
+.pf-line{font-size:12px; line-height:1.5; margin:5px 2px; color:var(--qv-muted);
+  word-wrap:break-word;}
+.pf-line b{color:var(--qv-text); font-weight:700;}
+.pf-line code{background:rgba(96,165,250,.08); border:1px solid rgba(96,165,250,.25);
+  border-radius:5px; padding:0 4px; font-size:11px; color:#a5c8ff;}
+.pf-pk{color:#34d399;}
+.pf-warn{color:#fbbf24;}
+.pf-info{color:#93c5fd;}
+.pf-muted{color:var(--qv-muted);}
 [data-testid="stCodeBlock"]{border-radius:12px;
   border:1px solid var(--qv-border); background:#0d1424;}
 .stDataFrame{background:rgba(255,255,255,.02); border-radius:12px;
   margin:6px 0 2px;}
 .stAlert{border-radius:12px;}
-/* Keep the sidebar expanded at all viewport widths. Streamlit 1.54
-   auto-collapses the sidebar (translateX(-100%) + 1px) when the window is
-   approx <=770px wide (docked DevTools / split screen). Collapse is applied
-   by swapping an emotion class on stSidebar, so an !important override on the
-   stable data-testid selector beats it and survives re-renders. */
+/* Sidebar visibility is custom-controlled, so Streamlit's own collapse
+   button and width-resize grip are disabled (they fight the rules below).
+   * Base   : sidebar pinned open — Streamlit's width-based auto-collapse
+     (emotion-class swap at window <= ~770px) can never hide it.
+   * Collapsed: only when the USER clicks our collapse control; this block
+     is injected via __SB_STATE_CSS__, emitted after the base rules so it
+     wins the same-specificity !important tie. */
+[data-testid="stSidebarCollapseButton"]{display:none !important;}
+[data-testid="stSidebar"] div[style*="col-resize"]{visibility:hidden !important;}
 [data-testid="stSidebar"][data-testid="stSidebar"][data-testid="stSidebar"]{
   width:300px !important; max-width:300px !important; min-width:300px !important;
   transform:none !important; visibility:visible !important;
   margin-right:0 !important;}
 [data-testid="stSidebar"] [data-testid="stSidebarContent"][data-testid="stSidebarContent"][data-testid="stSidebarContent"]{
   width:100% !important; max-width:100% !important; min-width:100% !important;}
+/* collapse/expand controls of our own */
+[class*="st-key-qv_sb_collapse"]{width:100%;}
+.sb-collapse-btn{font-size:11px; font-weight:600; color:var(--qv-muted);}
+[class*="st-key-qv_sb_open"]{position:fixed; top:10px; left:6px; z-index:12000;
+  width:36px; height:36px;}
+[class*="st-key-qv_sb_open"] button{
+  width:36px !important; min-width:36px !important; max-width:36px !important;
+  height:36px !important; min-height:36px !important; max-height:36px !important;
+  border-radius:50% !important; padding:0 !important; box-sizing:border-box;
+  background:rgba(16,24,40,.92); border:1px solid rgba(96,165,250,.35);
+  color:#9db4e0; font-size:15px; line-height:1; display:flex; align-items:center;
+  justify-content:center;}
+[class*="st-key-qv_sb_open"] button:hover{background:#233153; color:#fff;}
 /* At the widths where Streamlit would auto-collapse, keep the fixed input pill
    and mic inside the area right of the never-collapsed 300px sidebar. */
 @media (max-width: 770px){
@@ -333,12 +361,34 @@ _CSS = """
     width:min(440px, calc(100vw - 336px));
     transform:translateX(calc(-50% + 150px));}
 }
+__SB_STATE_CSS__
 </style>
 """.replace("__PATTERN__", _PATTERN_URL)
 
+def _sidebar_state_css() -> str:
+    """Extra rules injected when the USER collapsed the sidebar. Keeps the
+    auto-collapse pin in place otherwise (empty string = sidebar always on)."""
+    if st.session_state.get("qv_sb_collapsed"):
+        return (
+            "[data-testid=\"stSidebar\"][data-testid=\"stSidebar\"]"
+            "[data-testid=\"stSidebar\"]{"
+            "width:0px !important; max-width:0px !important; min-width:0px !important;"
+            "transform:translateX(-100%) !important; visibility:hidden !important;"
+            "margin-right:0 !important;}"
+            "[data-testid=\"stSidebar\"] [data-testid=\"stSidebarContent\"]{"
+            "display:none !important;}"
+            "[data-testid=\"stForm\"]{transform:translateX(-50%) !important;"
+            "width:min(740px, 93vw) !important;}"
+        )
+    return ""
+
+
 st.set_page_config(page_title="QueryVerify", layout="centered")
 
-st.markdown(_CSS, unsafe_allow_html=True)
+st.markdown(
+    _CSS.replace("__SB_STATE_CSS__", _sidebar_state_css()),
+    unsafe_allow_html=True,
+)
 
 st.markdown(
     f"""
@@ -353,6 +403,15 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+if st.session_state.get("qv_sb_collapsed"):
+    if st.button(
+        "»",
+        key="qv_sb_open",
+        help="Expand sidebar",
+    ):
+        st.session_state["qv_sb_collapsed"] = False
+        st.rerun()
 
 chat_history.init_db()
 
@@ -370,6 +429,10 @@ if "qv_db_schema" not in st.session_state:
     st.session_state["qv_db_schema"] = None
 if "qv_upload_sig" not in st.session_state:
     st.session_state["qv_upload_sig"] = None
+if "qv_db_profile" not in st.session_state:
+    st.session_state["qv_db_profile"] = None
+if "qv_sb_collapsed" not in st.session_state:
+    st.session_state["qv_sb_collapsed"] = False
 
 
 def _new_chat():
@@ -439,10 +502,12 @@ def _sweep_uploads(max_age_s: float, keep: Path | None = None) -> None:
             pass  # file in use / already gone; harmless
 
 
-def _build_uploaded_db(files) -> tuple[Path, list]:
+def _build_uploaded_db(files) -> tuple[Path, list, tuple]:
     """Validate + load uploaded CSVs into this session's private SQLite file.
 
-    Returns (db_path, schema) where schema is [(table, [cols], row_count)].
+    Returns (db_path, schema, profile) where schema is
+    [(table, [cols], row_count)] and profile is the data-driven
+    (primary_keys, foreign_keys) detection result from upload_profiler.
     On any error raises UserUploadError; the previous upload (if any) is kept
     untouched until the new set is fully built.
     """
@@ -482,8 +547,9 @@ def _build_uploaded_db(files) -> tuple[Path, list]:
         conn.close()
 
     schema = [(table_name, list(df.columns), len(df)) for table_name, df in loaded]
+    profile = upload_profiler.profile_uploads({name: df for name, df in loaded})
     _sweep_uploads(UPLOAD_TTL_SECONDS, keep=db_path)
-    return db_path, schema
+    return db_path, schema, profile
 
 
 def _render_schema_block(schema) -> None:
@@ -494,6 +560,44 @@ def _render_schema_block(schema) -> None:
         lines.append(
             f'<div class="sb-emptystate">• <code>{table_name}</code> '
             f"({cols_txt}) &middot; {n_rows} rows</div>"
+        )
+    st.markdown("\n".join(lines), unsafe_allow_html=True)
+
+
+def _render_profile_block(profile) -> None:
+    """Data-driven PK/FK findings shown under the uploaded schema."""
+    if not profile:
+        return
+    pk_results, fk_infos = profile
+    lines = [
+        '<div class="sb-emptystate" style="margin-top:10px">'
+        "<b>Data profile (read from values):</b></div>"
+    ]
+    for table, res in pk_results.items():
+        safe_table = html.escape(table)
+        if res.primary_key:
+            lines.append(
+                f'<div class="pf-line pf-pk">&#10003; <b>{safe_table}</b> &middot; '
+                f"primary key: <code>{html.escape(res.primary_key)}</code></div>"
+            )
+        else:
+            lines.append(
+                f'<div class="pf-line pf-muted">&bull; <b>{safe_table}</b> &middot; '
+                "no clear primary key detected</div>"
+            )
+        if res.warning:
+            lines.append(
+                f'<div class="pf-line pf-warn">&#9888; <b>{safe_table}</b> &middot; '
+                f"{html.escape(res.warning)}</div>"
+            )
+    for info in fk_infos:
+        ref = html.escape(info.references_table)
+        lines.append(
+            f'<div class="pf-line pf-info">&#8594; <b>{html.escape(info.table)}.'
+            f"{html.escape(info.column)}</b> references {ref}."
+            f"<code>{html.escape(info.references_column)}</code> &middot; "
+            f"{info.orphan_rows} row(s) reference a value not found in {ref}"
+            " &mdash; these may show as Unknown</div>"
         )
     st.markdown("\n".join(lines), unsafe_allow_html=True)
 
@@ -514,7 +618,15 @@ if not st.session_state.get("_qv_swept_once"):
 
 
 with st.sidebar:
-    st.markdown('<div class="sb-brand">QueryVerify</div>', unsafe_allow_html=True)
+    _sb_header = st.columns([1, 0.42], vertical_alignment="center")
+    with _sb_header[0]:
+        st.markdown(
+            '<div class="sb-brand">QueryVerify</div>', unsafe_allow_html=True
+        )
+    with _sb_header[1]:
+        if st.button("«", key="qv_sb_collapse", help="Collapse sidebar"):
+            st.session_state["qv_sb_collapsed"] = True
+            st.rerun()
     if st.button("＋ New chat", key="qv_new_chat", use_container_width=True):
         _new_chat()
         st.rerun()
@@ -581,9 +693,10 @@ with st.sidebar:
         _sig = [(f.name, f.size) for f in _uploaded_files]
         if _sig != st.session_state["qv_upload_sig"]:
             try:
-                _db_path, _schema = _build_uploaded_db(_uploaded_files)
+                _db_path, _schema, _profile = _build_uploaded_db(_uploaded_files)
                 st.session_state["qv_db_path"] = str(_db_path)
                 st.session_state["qv_db_schema"] = _schema
+                st.session_state["qv_db_profile"] = _profile
                 st.session_state["qv_upload_sig"] = _sig
                 st.session_state["qv_db_mode"] = "My Uploaded Data"
                 st.success(
@@ -614,6 +727,7 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
         _render_schema_block(st.session_state["qv_db_schema"])
+        _render_profile_block(st.session_state.get("qv_db_profile"))
 
 
 @st.cache_resource

@@ -168,6 +168,7 @@ def _check_consistency(question: str, schema_context: str, engine, original_resu
     group-by label + numeric values). A candidate whose SQL fails to execute
     is retried with repair feedback before it counts as a non-agreeing sample.
     Returns (score, note)."""
+    dialect = engine.dialect.name if engine is not None else "sqlite"
     t0 = perf_counter()
     candidates = []
     dropped = 0
@@ -178,7 +179,13 @@ def _check_consistency(question: str, schema_context: str, engine, original_resu
         feedback = ""
         for c_attempt in range(settings.max_repair_attempts):
             try:
-                sql = generate_sql(question, schema_context, error_feedback=feedback, temperature=0.6)
+                sql = generate_sql(
+                    question,
+                    schema_context,
+                    error_feedback=feedback,
+                    temperature=0.6,
+                    dialect=dialect,
+                )
             except LLMTimeoutError:
                 feedback = "SQL generation timed out; please try again."
                 continue
@@ -231,6 +238,7 @@ def _score_to_label(score: float) -> str:
 
 def run_pipeline(question: str, schema_context: str, engine, trace: list | None = None) -> dict:
     """Run the generate -> execute -> verify loop with repair attempts."""
+    dialect = engine.dialect.name if engine is not None else "sqlite"
     error_feedback = ""
     sql = ""
     result = {}
@@ -240,7 +248,7 @@ def run_pipeline(question: str, schema_context: str, engine, trace: list | None 
         t0 = perf_counter()
         try:
             sql = generate_sql(
-                question, schema_context, error_feedback, temperature=0.2
+                question, schema_context, error_feedback, temperature=0.2, dialect=dialect
             )
         except LLMTimeoutError as exc:
             trace_add(

@@ -41,11 +41,27 @@ def _is_default_database(engine) -> bool:
 
 
 def _sample_values(conn, table: str, column: str) -> list[str]:
-    q = text(
-        f'SELECT "{column}" FROM "{table}" '
-        f'WHERE "{column}" IS NOT NULL AND CAST("{column}" AS TEXT) <> \'\' '
-        f'GROUP BY "{column}" ORDER BY COUNT(*) DESC, MIN("{column}") LIMIT :n'
-    )
+    """Top sample values for a text column, dialect-aware.
+
+    SQLite sorts text values by their raw TEXT form; SQL Server needs the
+    GROUP BY target normalized to NVARCHAR (its legacy TEXT type cannot be
+    grouped or compared with <>), a TOP clause instead of LIMIT, and an
+    NVARCHAR-typed cast for the empty-string check.
+    """
+    dialect = conn.dialect.name
+    if dialect == "mssql":
+        q = text(
+            f'SELECT TOP (:n) "{column}" FROM "{table}" '
+            f'WHERE "{column}" IS NOT NULL AND '
+            f'LTRIM(RTRIM(CONVERT(NVARCHAR(MAX), "{column}"))) <> N\'\' '
+            f'GROUP BY "{column}" ORDER BY COUNT(*) DESC, MIN("{column}")'
+        )
+    else:
+        q = text(
+            f'SELECT "{column}" FROM "{table}" '
+            f'WHERE "{column}" IS NOT NULL AND CAST("{column}" AS TEXT) <> \'\' '
+            f'GROUP BY "{column}" ORDER BY COUNT(*) DESC, MIN("{column}") LIMIT :n'
+        )
     return [str(row[0]) for row in conn.execute(q, {"n": SAMPLE_LIMIT}).fetchall()]
 
 
@@ -66,7 +82,9 @@ def get_schema_context(engine) -> str:
             text_cols = [
                 col["name"]
                 for col in columns
-                if str(col["type"]).upper().startswith(("TEXT", "CHAR", "VARCHAR"))
+                if str(col["type"]).upper().startswith(
+                    ("TEXT", "CHAR", "VARCHAR", "NCHAR", "NVARCHAR", "NTEXT")
+                )
             ]
             for col in text_cols:
                 samples = _sample_values(conn, table_name, col)

@@ -66,10 +66,19 @@ def resolve_db(database: str | None) -> Path:
 def get_engine(database: str | None = None):
     """Return an engine for the given database (default: the sample DB).
 
-    Engines are cached per resolved path. NullPool keeps no connection alive
-    between requests, so a session-scoped upload file can be deleted while the
-    server runs (Windows file locks are never held).
+    When the configured DATABASE_URL is a server database (e.g. SQL Server),
+    the default engine is built straight from that URL, exactly as
+    default_engine() would. Session-scoped SQLite uploads still resolve through
+    resolve_db() so their file lives in data/ and is never locked.
     """
+    if not database and not settings.database_url.startswith("sqlite"):
+        key = f"url::{settings.database_url}"
+        engine = _ENGINES.get(key)
+        if engine is None:
+            engine = create_engine(settings.database_url)
+            _ENGINES[key] = engine
+        return engine
+
     path = resolve_db(database)
     if not path.exists():
         raise ValueError(

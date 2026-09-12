@@ -7,3 +7,5 @@ data/*.db
 .pytest_cache/
 *.log
 shots/
+
+.env.mssql

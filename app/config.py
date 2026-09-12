@@ -9,6 +9,8 @@ Later:    LLM_PROVIDER=openai   -> swap to a cloud model for a hosted demo,
           (or anthropic)           without touching agent/pipeline code.
 """
 
+import os
+
 from pydantic_settings import BaseSettings
 
 
@@ -34,7 +36,10 @@ class Settings(BaseSettings):
     self_consistency_samples: int = 3
 
     class Config:
-        env_file = ".env"
+        # QV_ENV_FILE lets a caller swap the config file without touching the
+        # real .env (e.g. run the suite against a SQL Server database:
+        #   $env:QV_ENV_FILE = ".env.mssql").
+        env_file = os.environ.get("QV_ENV_FILE", ".env")
 
 
 settings = Settings()

@@ -1,9 +1,20 @@
 # Backend container: FastAPI + SQL agents. Ollama is NOT containerized — it
 # runs natively on the host and is reached via http://host.docker.internal:11434
-# (set on the backend service in docker-compose.yml).
+# (set on the backend service in docker-compose.yml). SQL Server is reached the
+# same way (host.docker.internal), so the image ships the Microsoft ODBC Driver
+# 17 + pyodbc that mssql+pyodbc needs.
 FROM python:3.11-slim
 
 WORKDIR /app
+
+# ODBC Driver 17 for SQL Server (Debian bookworm) — required for mssql+pyodbc.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates gnupg2 \
+    && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg \
+    && curl -fsSL https://packages.microsoft.com/config/debian/12/prod.list > /etc/apt/sources.list.d/mssql-release.list \
+    && apt-get update \
+    && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql17 unixodbc-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -14,6 +25,6 @@ COPY data/ data/
 
 EXPOSE 8000
 
-# database_url defaults to sqlite:///./data/sample.db (relative to /app), so the
-# mounted ./data bind mount at /app/data is where SQLite lives.
+# DATABASE_URL comes from the backend service environment in docker-compose.yml
+# (mssql+pyodbc reaching SQL Server on the host via host.docker.internal).
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

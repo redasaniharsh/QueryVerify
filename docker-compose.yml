@@ -7,6 +7,12 @@ services:
     environment:
       # Reach Ollama running natively on the Windows host (not in a container).
       OLLAMA_HOST: http://host.docker.internal:11434
+      # SQL Server also runs natively on the host and is reached the same way.
+      # SQL auth over a fixed TCP port is required from a Linux container
+      # (Windows trusted_connection does not work there). Adjust the login and
+      # make sure SQL Server has TCP/IP enabled (SQL Server Configuration
+      # Manager) and the port is reachable from Docker.
+      DATABASE_URL: mssql+pyodbc://sa:${MSSQL_SA_PASSWORD:-YourStrong!Passw0rd}@host.docker.internal:1433/QueryVerifyTest?driver=ODBC+Driver+17+for+SQL+Server
       PYTHONUNBUFFERED: "1"
     extra_hosts:
       # Defensive: Windows/macOS Docker Desktop resolves host.docker.internal

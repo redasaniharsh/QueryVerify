@@ -8,16 +8,33 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 
 
 def _reject_reason(sql: str) -> str | None:
-    """Return why a query is rejected, or None if it is a single read-only SELECT."""
+    """Return why a query is rejected, or None if it is a single read-only SELECT.
+
+    ONE leading WITH clause (a CTE) is allowed as long as the terminating
+    command is still a single SELECT. Depth-0 token scan only: sqlparse renders
+    each CTE definition list as one generic token, so the only DML keywords seen
+    at this level are the real command verbs."""
     parsed = sqlparse.parse(sql)
     if not parsed:
         return "Empty query"
     if len(parsed) > 1:
         return "Only a single SELECT statement is allowed"
-    first_token = parsed[0].token_first(skip_cm=True)
-    if first_token is None or first_token.value.upper() != "SELECT":
-        return "Only SELECT statements are allowed"
-    return None
+    saw_with = False
+    for tok in parsed[0].tokens:
+        if tok.is_whitespace or (tok.ttype is not None and sqlparse.tokens.Comment in tok.ttype):
+            continue
+        if tok.ttype is sqlparse.tokens.Keyword.CTE:
+            saw_with = True
+            continue
+        if tok.ttype is sqlparse.tokens.Keyword.DML:
+            if tok.value.upper() != "SELECT":
+                return f"Only SELECT statements are allowed (found {tok.value.upper()})"
+            return None
+        if not saw_with:
+            return "Only SELECT statements are allowed"
+        # saw_with + generic CTE-definition token: keep scanning for the
+        # terminating SELECT command.
+    return "Only SELECT statements are allowed (a WITH query must end in SELECT)"
 
 
 def is_read_only(sql: str) -> bool:

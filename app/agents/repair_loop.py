@@ -9,7 +9,7 @@ from time import perf_counter
 from sqlalchemy import inspect, text
 
 from app.config import settings
-from app.agents.sql_generator import generate_sql
+from app.agents.sql_generator import generate_sql, semantic_feedback
 from app.agents.executor import execute_sql
 from app.agents.verifier import verify_result
 from app.llm.ollama_client import LLMTimeoutError
@@ -186,6 +186,10 @@ def _check_consistency(question: str, schema_context: str, engine, original_resu
                     temperature=0.6,
                     dialect=dialect,
                 )
+                guard_msg = semantic_feedback(question, sql)
+                if guard_msg:
+                    feedback = guard_msg
+                    continue
             except LLMTimeoutError:
                 feedback = "SQL generation timed out; please try again."
                 continue
@@ -272,6 +276,23 @@ def run_pipeline(question: str, schema_context: str, engine, trace: list | None 
             trace_add(
                 trace, "generation", f"Attempt {attempt + 1}: generated SQL", gen_dur
             )
+
+        t0 = perf_counter()
+        guard_msg = semantic_feedback(question, sql)
+        if guard_msg:
+            # Accumulate distinct guard findings across attempts instead of
+            # overwriting: a repair that fixes one shape mistake must not erase
+            # the memory of an earlier one, otherwise the loop ping-pongs
+            # between partial fixes (e.g. is-not-null and float-rate).
+            if guard_msg not in error_feedback:
+                error_feedback = (error_feedback + " " + guard_msg).strip()
+            trace_add(
+                trace,
+                "generation",
+                f"Attempt {attempt + 1}: semantic guard — {guard_msg[:140]}",
+                perf_counter() - t0,
+            )
+            continue
 
         t0 = perf_counter()
         result = execute_sql(sql, engine)

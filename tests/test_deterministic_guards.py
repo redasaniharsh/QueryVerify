@@ -57,7 +57,10 @@ PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
         "INSERT INTO customers VALUES (1, 'x')",
         "TRUNCATE TABLE fact_sales",
         "ALTER TABLE fact_sales ADD COLUMN x INTEGER",
-        "WITH cte AS (SELECT 1) SELECT * FROM cte",
+        "WITH cte AS (SELECT 1) DELETE FROM cte",
+        "WITH cte AS (SELECT 1) UPDATE cte SET x = 0",
+        "WITH cte AS (SELECT 1) INSERT INTO t SELECT * FROM cte",
+        "WITH cte AS (SELECT 1) DROP TABLE cte",
         "SELECT * FROM customers; DROP TABLE customers;",
         "SELECT 1; SELECT 2",
     ],
@@ -74,6 +77,10 @@ def test_is_read_only_rejects_non_single_select(sql):
         "SELECT COUNT(customer_id) FROM dim_customers",
         "SELECT 'a;b' AS x",
         "SELECT 1;",
+        # A single leading WITH whose terminating statement is one SELECT is
+        # read-only and allowed (multi-Cte averages, recursive lookups).
+        "WITH cte AS (SELECT 1) SELECT * FROM cte",
+        "WITH a AS (SELECT 1), b AS (SELECT 2) SELECT * FROM a JOIN b",
     ],
 )
 def test_is_read_only_accepts_single_select(sql):

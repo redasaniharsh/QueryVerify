@@ -42,6 +42,7 @@ _TABLE_METRICS = {
     "dim_products": {
         "cost": ["cost"],
         "price": ["cost"],
+        "number": ["product_id"],
     },
     "fact_sales": {
         "amount": ["sales_amount"],
@@ -297,6 +298,16 @@ time, not here.
 - Only mark ambiguous when a ranking word like "top", "best", "worst", "most \
 popular", "best-selling" has no defined criterion (by revenue? by count? by \
 recency?), or when a required filter value is missing (which year? which product?).
+- A superlative that NAMES its criterion is NOT ambiguous: 'oldest'/'youngest' \
+mean by age, 'most recent' by date, 'top-selling' by number sold or revenue.
+  Never ask "by what?" when the question already states it. E.g. "Who are the \
+3 oldest passengers?" is a clear request for the 3 passengers with the highest \
+age - do not ask which age metric. An unqualified ranking word ("top", "best") \
+with no criterion at all is still ambiguous.
+- A question that asks WHICH group members meet a numeric criterion is a \
+filtered breakdown, NOT a request to pick one group: "which passenger classes \
+have more than 200 passengers?" means run the filter and show every class that \
+qualifies. Never answer "which X do you mean?" for such questions.
 - A question naming a specific filter value (a place, date, category, or ID) is \
 NOT ambiguous, even if that value might not exist in the data or might return \
 zero results — that's a valid, answerable question with the answer 'zero' or \
@@ -311,6 +322,16 @@ naming the columns (e.g. 'Did you mean the product's cost or the sale price?').
 - A metric that maps to exactly one column for the entity named in the question \
 is NOT ambiguous (e.g. 'average sale price' -> one column). Only flag when a \
 real multi-column choice exists.
+- One metric computed for two EXPLICITLY named groups is NOT ambiguous. E.g. \
+'average fare paid by passengers who survived compared to those who didn't' \
+means AVG(Fare) for group survived=1 and group survived=0; do not invent a \
+third 'average of all fares' interpretation, the two groups are already named. \
+Same for 'survived vs not survived', 'road bikes vs mountain bikes'.
+- Asking which member of a group has the HIGHEST or LOWEST value of a named \
+measure is unambiguous: 'which embarkation port had the highest survival \
+rate?' ranks ports by the survival-rate measure. Do not offer 'count of \
+survivors vs percentage' as alternatives — 'survival rate' already names the \
+single measure.
 
 Respond in strict JSON only, no other text:
 {"ambiguous": true or false, "clarifying_question": "if ambiguous, ask a short \
@@ -387,6 +408,15 @@ def _resolve_metric(question: str, schema_tables: dict[str, list[str]]) -> Optio
     anchor = _METRIC_ANCHOR.get(metric_tok)
     if anchor is not None and anchor in entity_tables:
         metric_tables = [anchor]
+    elif metric_tok == "number":
+        # "number of X" is a generic COUNT, not the order_number column. Bind it
+        # to the identity column of the entity the question names, falling back
+        # on the default dimension when no entity is named. Never let "number"
+        # fall back onto fact_sales.order_number unless the question names a
+        # fact entity — otherwise plain questions ("total number of countries")
+        # get a phantom "Did you mean customer_id or order_number?".
+        dim_entities = [t for t in entity_tables if t in ("dim_customers", "dim_products")]
+        metric_tables = dim_entities or ["dim_customers"]
     else:
         metric_tables = entity_tables
 
@@ -543,6 +573,51 @@ def check_ambiguity(question: str, schema_context: str) -> dict:
             resolved["schema_hint"] = (resolved.get("schema_hint") or "") + "\n\n" + hint
         resolved.update(meta)
         return resolved
+
+    # --- deterministic fallbacks before the LLM judge ---------------------
+    # (a) Two-group comparison: a single metric computed for two explicitly
+    # named populations ("passengers who survived" vs "those who didn't") is
+    # clear — the groups are named, there is no undefined criterion to ask about.
+    if re.search(r"\b(?:compared to|versus|vs\.?)\b", q, re.IGNORECASE) and re.search(
+        r"\b(?:average|avg|mean|total|sum|count|number|rate|percentage|ratio)\b",
+        q, re.IGNORECASE,
+    ):
+        meta["determinism_note"] = "two-group comparison (single metric, named groups)"
+        return {"ambiguous": False, "clarifying_question": "", **meta}
+
+    # (b) Superlative whose CRITERION is a named measure ("highest survival
+    # rate" = rank by the 'survival rate' measure, not a vague 'highest what?').
+    _SUPERLATIVE = r"\b(?:highest|lowest|largest|smallest|most|best|worst)\b"
+    _MEASURE = r"\b(?:rate|ratio|average|avg|mean|total|sum|count|number|sales|revenue|amount|fare|price|age|value|cost|quantity|percentage|spending|orders)\b"
+    if re.search(
+        _SUPERLATIVE + r"(?:\s+(?:\w+|,)){0,3}\s+" + _MEASURE, q, re.IGNORECASE
+    ):
+        meta["determinism_note"] = "named-criterion superlative"
+        return {"ambiguous": False, "clarifying_question": "", **meta}
+
+    # (c) "which X have/are more than N <thing>" is a filtered breakdown, not a
+    # request to pick one group: the numeric threshold is a FILTER, exactly like
+    # a named country or date, and the question names the dimension to group by.
+    # A threshold value can never be an ambiguity — the criterion is stated.
+    if re.search(r"\bwhich\b", q, re.IGNORECASE) and re.search(
+        r"\b(?:more|at\s+least|at\s+most|fewer|less)\s+than\s+\d+(?:[.,]\d+)?\b",
+        q,
+        re.IGNORECASE,
+    ):
+        meta["determinism_note"] = "numeric-threshold filtered breakdown"
+        return {"ambiguous": False, "clarifying_question": "", **meta}
+
+    # (d) Age/date superlatives name their criterion BY DEFINITION: 'oldest'
+    # means highest age, 'youngest' lowest age, 'newest' most recent date.
+    # A leading count ("the 3 oldest") is a plain top-N ranking of that same
+    # unambiguous criterion. Unlike 'top'/'best', there is nothing to ask.
+    if re.search(
+        r"\b(?:the\s+)?\d?(?:st|nd|rd|th)?\s*(?:oldest|youngest|newest)\b",
+        q,
+        re.IGNORECASE,
+    ):
+        meta["determinism_note"] = "age/date superlative"
+        return {"ambiguous": False, "clarifying_question": "", **meta}
 
     prompt = f"Schema:\n{schema_context}\n\nQuestion: {q}"
 

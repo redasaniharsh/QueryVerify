@@ -28,12 +28,20 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     cloud_sql_model: str = "gpt-4o-mini"
 
-    # Database
-    database_url: str = "sqlite:///./data/sample.db"
+    # Database: SQL Server is THE database. SQLite is used only for internal
+    # per-session CSV uploads and local chat history, never for the sample set.
+    database_url: str = (
+        "mssql+pyodbc://.\\SQLEXPRESS/QueryVerifyTest"
+        "?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes"
+    )
 
     # Agent behavior
     max_repair_attempts: int = 3
     self_consistency_samples: int = 3
+
+    # Max rows returned to the UI per query. Queries that return more are
+    # truncated with a clear notice (never dropped silently, never hang).
+    max_result_rows: int = 25_000
 
     class Config:
         # QV_ENV_FILE lets a caller swap the config file without touching the

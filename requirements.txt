@@ -3,6 +3,7 @@ uvicorn[standard]==0.30.6
 pydantic==2.9.2
 pydantic-settings==2.5.2
 sqlalchemy==2.0.35
+pyodbc==5.3.0
 ollama==0.3.3
 streamlit==1.54.0
 pandas==2.3.3

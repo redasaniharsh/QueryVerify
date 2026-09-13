@@ -3,6 +3,7 @@ Ties generation + execution + verification together into the retry loop,
 with self-consistency cross-check on first verified match.
 """
 
+import hashlib
 import re
 from time import perf_counter
 
@@ -143,6 +144,45 @@ def _row_signatures(rows: list[dict], id_key: str | None) -> set:
     return sig
 
 
+def _result_fingerprint(rows: list[dict], id_columns: set[str] | None = None) -> str:
+    """Deterministic order-independent fingerprint of a result set.
+
+    Normalizes values (trim strings, cast numbers, None→Unknown), excludes
+    identifier columns, sorts rows by their normalized content so that row
+    ordering differences don't matter, then SHA256-hashes the canonical form.
+    Two result sets with the same logical content will always produce the
+    same fingerprint, regardless of row order or minor numeric precision
+    differences — but different actual data will produce different hashes.
+    """
+    import hashlib as _h
+
+    def _norm(v):
+        if v is None:
+            return "Unknown"
+        if isinstance(v, bool):
+            return "True" if v else "False"
+        if isinstance(v, (int, float)):
+            # round to 10 decimal places to tame floating-point noise
+            return round(v, 10)
+        if isinstance(v, str):
+            return v.strip()
+        return str(v)
+
+    if id_columns is None:
+        id_columns = set()
+    normalized = []
+    for row in rows:
+        # drop identifier columns; only keep answer-carrying data
+        kept = {k: _norm(v) for k, v in row.items() if k not in id_columns}
+        # create a canonical tuple so two rows with same content in different
+        # key order compare equal
+        normalized.append(tuple(sorted(kept.items())))
+    # sort the row tuples themselves so order doesn't matter
+    normalized.sort()
+    serialized = str(normalized)
+    return _h.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 def _identity_key(all_columns: list[set]) -> str | None:
     """Pick the strongest identifier column shared by every compared result
     (prefer true ids/keys over *_number / *_code), or None, in which case
@@ -200,14 +240,18 @@ def _check_consistency(question: str, schema_context: str, engine, original_resu
             feedback = result["error"]
     dropped -= len(candidates)
 
+    # Determine identifier columns shared by all results, so the fingerprint
+    # can drop them (otherwise different projected keys would cause false
+    # mismatches even when answers are semantically identical).
     all_columns = [set(original_result["columns"])] + [set(c["columns"]) for c in candidates]
     id_key = _identity_key(all_columns)
+    id_columns = {id_key} if id_key else set()
 
-    original_sig = _row_signatures(original_result["rows"], id_key)
+    original_fp = _result_fingerprint(original_result["rows"], id_columns)
     agreement_count = 1 + sum(
         1
         for c in candidates
-        if _row_signatures(c["rows"], id_key) == original_sig
+        if _result_fingerprint(c["rows"], id_columns) == original_fp
     )
 
     score = agreement_count / settings.self_consistency_samples

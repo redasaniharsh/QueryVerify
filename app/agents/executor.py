@@ -6,6 +6,8 @@ import sqlparse
 from sqlalchemy import text
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
+from app.config import settings
+
 
 def _reject_reason(sql: str) -> str | None:
     """Return why a query is rejected, or None if it is a single read-only SELECT.
@@ -53,18 +55,47 @@ def _normalize_nulls(rows: list[dict]) -> list[dict]:
     ]
 
 
+def _capped_result(columns: list, raw_rows: list, max_rows: int) -> dict:
+    """Build a serializable result dict, truncating oversized sets with a
+    clear notice. Never hides the truncation: the UI shows the notice so the
+    user knows the answer is partial and is told how to narrow it."""
+    truncated = len(raw_rows) > max_rows
+    kept = raw_rows[:max_rows]
+    out = {
+        "success": True,
+        "columns": columns,
+        "rows": _normalize_nulls([dict(zip(columns, row)) for row in kept]),
+    }
+    if truncated:
+        out["truncated"] = True
+        out["total_rows"] = None
+        out["notice"] = (
+            f"The query returned more than {max_rows} rows. Showing the first "
+            f"{max_rows} — narrow the question (filter, LIMIT/SELECT TOP, or "
+            "aggregate) to see the exact total."
+        )
+    return out
+
+
 def execute_sql(sql: str, engine) -> dict:
-    """Execute a SQL query with a timeout and return a serializable result dict."""
+    """Execute a SQL query with a timeout and return a serializable result dict.
+
+    Result sets are capped at settings.max_result_rows; anything larger is
+    truncated with a notice (never fetched into one giant list, never hung)."""
     rejection = _reject_reason(sql)
     if rejection:
         return {"success": False, "error": rejection}
+
+    max_rows = settings.max_result_rows
 
     def _run():
         with engine.connect() as conn:
             result = conn.execute(text(sql))
             columns = list(result.keys())
-            rows = _normalize_nulls([dict(zip(columns, row)) for row in result.fetchall()])
-            return {"success": True, "columns": columns, "rows": rows}
+            # fetch max_rows+1 so we can tell whether more rows exist without
+            # ever pulling an unbounded set into memory.
+            raw = list(result.fetchmany(max_rows + 1))
+            return _capped_result(columns, raw, max_rows)
 
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:

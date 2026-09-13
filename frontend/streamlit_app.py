@@ -450,6 +450,22 @@ def _sync_conversation_url(conv_id):
     st.query_params.from_dict(params)
 
 
+def _sync_sidebar_url():
+    """Keep ?sb=0|1 in the URL so a browser reload restores the sidebar state.
+
+    session_state does NOT survive a real reload, but the address bar does.
+    Written through st.query_params.from_dict() (a single no-rerun update), so
+    it never causes an extra script run.
+    """
+    collapsed = st.session_state.get("qv_sb_collapsed", False)
+    params = {k: v for k, v in st.query_params.items() if k != "sb"}
+    if collapsed:
+        params["sb"] = "1"
+    else:
+        params.pop("sb", None)
+    st.query_params.from_dict(params)
+
+
 def _new_chat():
     st.session_state.conv_id = None
     st.session_state.messages = []
@@ -515,6 +531,13 @@ if "qv_booted" not in st.session_state:
             st.query_params.from_dict(
                 {k: v for k, v in st.query_params.items() if k != "conv"}
             )
+
+    # ---- Persist sidebar collapse state in URL (same pattern as ?conv=) ----
+    raw_sb = st.query_params.get("sb")
+    if isinstance(raw_sb, list):
+        raw_sb = raw_sb[0] if raw_sb else None
+    if raw_sb is not None and raw_sb in ("0", "1"):
+        st.session_state["qv_sb_collapsed"] = raw_sb == "1"
 
 
 class UserUploadError(Exception):
@@ -679,6 +702,7 @@ with st.sidebar:
     with _sb_header[1]:
         if st.button("«", key="qv_sb_collapse", help="Collapse sidebar"):
             st.session_state["qv_sb_collapsed"] = True
+            _sync_sidebar_url()
             st.rerun()
     if st.button("＋ New chat", key="qv_new_chat", use_container_width=True):
         _new_chat()

@@ -443,10 +443,17 @@ def _sync_conversation_url(conv_id):
     session_state does NOT survive a real reload, but the address bar does.
     Written through st.query_params.from_dict() (a single no-rerun update), so
     it never causes an extra script run. None clears the parameter (new chat).
+
+    Key: explicitly preserve the ?sb= sidebar param so it is not wiped when
+    conversation sync runs (and vice‑versa).
     """
-    params = {k: v for k, v in st.query_params.items() if k != "conv"}
+    # Start from a copy of ALL existing params, then override only 'conv'.
+    # This preserves any ?sb= that may already be in the URL.
+    params = dict(st.query_params)
     if conv_id is not None:
         params["conv"] = str(conv_id)
+    else:
+        params.pop("conv", None)
     st.query_params.from_dict(params)
 
 
@@ -456,9 +463,14 @@ def _sync_sidebar_url():
     session_state does NOT survive a real reload, but the address bar does.
     Written through st.query_params.from_dict() (a single no-rerun update), so
     it never causes an extra script run.
+
+    Key: explicitly preserve the ?conv= conversation param so it is not wiped
+    when sidebar sync runs (and vice‑versa).
     """
     collapsed = st.session_state.get("qv_sb_collapsed", False)
-    params = {k: v for k, v in st.query_params.items() if k != "sb"}
+    # Start from a copy of ALL existing params, then override only 'sb'.
+    # This preserves any ?conv= that may already be in the URL.
+    params = dict(st.query_params)
     if collapsed:
         params["sb"] = "1"
     else:

@@ -38,14 +38,16 @@ if str(_FRONTEND_DIR) not in sys.path:
     sys.path.insert(0, str(_FRONTEND_DIR))
 import chat_history  # local module: SQLite persistence for conversations
 import upload_profiler  # local module: data-driven PK/FK detection for uploads
+import upload_loader  # local module: CSV / Excel (.xlsx) parsing for uploads
 
 # Backend endpoint. Overridable (QV_API_URL) so the containerized frontend can
 # reach the backend service by Docker DNS name (http://backend:8000/ask).
 API_URL = os.environ.get("QV_API_URL", "http://127.0.0.1:8000/ask")
 
-# Bring-your-own-data: uploaded CSVs are loaded into a NEW, separate SQLite file
-# per browser session (data/user_upload_<session_id>.db). The sample DB is never
-# touched. Files are temporary: replaced on a new upload and swept once they are
+# Bring-your-own-data: uploaded spreadsheets (CSV / Excel .xlsx) are loaded
+# into a NEW, separate SQLite file per browser session
+# (data/user_upload_<session_id>.db). The sample DB is never touched. Files are
+# temporary: replaced on a new upload and swept once they are
 # older than UPLOAD_TTL_SECONDS (the browser tab is the only real lifecycle).
 _UPLOAD_DIR = Path(__file__).resolve().parent.parent / "data"
 UPLOAD_MAX_BYTES = int(os.environ.get("QV_UPLOAD_MAX_MB", "50")) * 1024 * 1024
@@ -503,7 +505,8 @@ def _sweep_uploads(max_age_s: float, keep: Path | None = None) -> None:
 
 
 def _build_uploaded_db(files) -> tuple[Path, list, tuple]:
-    """Validate + load uploaded CSVs into this session's private SQLite file.
+    """Validate + load uploaded files (CSV / Excel .xlsx) into this session's
+    private SQLite file.
 
     Returns (db_path, schema, profile) where schema is
     [(table, [cols], row_count)] and profile is the data-driven
@@ -517,19 +520,23 @@ def _build_uploaded_db(files) -> tuple[Path, list, tuple]:
     loaded = []  # (table_name, DataFrame) — parse everything BEFORE writing
     for uploaded_file in files:
         fname = uploaded_file.name
-        if not fname.lower().endswith(".csv"):
-            raise UserUploadError(f"{fname}: only CSV files are supported.")
+        if not fname.lower().endswith((".csv", ".xlsx")):
+            raise UserUploadError(
+                f"{fname}: only CSV and Excel (.xlsx) files are supported."
+            )
         if (uploaded_file.size or 0) > UPLOAD_MAX_BYTES:
             raise UserUploadError(
                 f"{fname}: file is too large "
                 f"(max {UPLOAD_MAX_BYTES // (1024 * 1024)} MB)."
             )
         try:
-            df = pd.read_csv(io.BytesIO(uploaded_file.getvalue()))
+            df = upload_loader.load_uploaded_file(fname, uploaded_file.getvalue())
+        except ValueError as exc:
+            raise UserUploadError(str(exc))
         except Exception as exc:
             raise UserUploadError(f"Could not parse {fname}: {exc}")
         if df.shape[1] == 0:
-            raise UserUploadError(f"{fname}: the CSV has no columns.")
+            raise UserUploadError(f"{fname}: the file has no columns.")
         loaded.append((_sanitize_table_name(fname), df))
 
     db_path = _UPLOAD_DIR / f"user_upload_{st.session_state['qv_session_id']}.db"
@@ -678,14 +685,14 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.file_uploader(
-        "Upload CSV file(s)",
-        type=["csv"],
+        "Upload CSV or Excel (.xlsx) file(s)",
+        type=["csv", "xlsx"],
         accept_multiple_files=True,
         key="qv_csv_upload",
         help=(
-            "Load your own CSV data to ask questions about it. One SQLite table "
-            "is created per file, named after the file. The sample dataset is "
-            "never modified."
+            "Load your own CSV or Excel (.xlsx) data to ask questions about "
+            "it. One SQLite table is created per file, named after the file. "
+            "The sample dataset is never modified."
         ),
     )
     _uploaded_files = st.session_state.get("qv_csv_upload")

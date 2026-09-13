@@ -34,7 +34,11 @@ import pathlib
 import pytest
 
 from app.agents.executor import is_read_only, execute_sql
-from app.agents.orchestrator import has_destructive_intent, absent_entity
+from app.agents.orchestrator import (
+    has_destructive_intent,
+    absent_entity,
+    schema_concept_mismatch,
+)
 from app.agents import repair_loop
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -165,6 +169,84 @@ def test_absent_entity_detects_non_schema_topics(question, expected):
 )
 def test_absent_entity_ignores_schema_topics(question):
     assert absent_entity(question) is None
+
+
+# --------------------------------------------------------------------------
+# Schema-aware concept guard (app.agents.orchestrator)
+# --------------------------------------------------------------------------
+# Deterministic, zero LLM cost: names a business concept (sales, customers,
+# orders, ...) that maps to NO real column/table in the ACTIVE schema.
+
+SAMPLE_SCHEMA = (
+    "Table: dim_customers (customer_key INTEGER, customer_id TEXT, country TEXT)\n"
+    "Table: fact_sales (order_number TEXT, customer_key INTEGER, sales_amount REAL, "
+    "quantity INTEGER, price REAL)\n"
+    "Table: dim_products (product_key INTEGER, product_name TEXT, category TEXT, "
+    "cost REAL)\n"
+)
+TITANIC_SCHEMA = (
+    "Table: titanic_dataset (PassengerId INTEGER, Survived INTEGER, Pclass INTEGER, "
+    "Name TEXT, Sex TEXT, Age REAL, Fare REAL, Embarked TEXT)\n"
+)
+
+
+@pytest.mark.parametrize(
+    "question,expected",
+    [
+        ("What is the total sales amount in this dataset?", ["sales"]),
+        ("How many customers are there in Germany?", ["customers"]),
+        ("Show me total revenue and profit", ["revenue", "profit"]),
+        ("List all suppliers and their refunds", ["suppliers", "refunds"]),
+    ],
+)
+def test_concept_mismatch_detects_absent_concepts_on_upload(question, expected):
+    assert schema_concept_mismatch(question, TITANIC_SCHEMA) == expected
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What is the total sales amount in this dataset?",
+        "How many customers are there in Germany?",
+        "What is the total revenue by country?",
+        "What is the total quantity of products sold?",
+        "What is the average cost of products?",
+    ],
+)
+def test_concept_mismatch_silent_on_sample_schema(question):
+    # All named concepts map to a real table/column in the sample schema
+    # (sales_amount, customer_key, country, quantity, product_key, cost).
+    assert schema_concept_mismatch(question, SAMPLE_SCHEMA) == []
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "How many passengers survived?",
+        "Show me the top passengers",
+        "What is the average age of passengers?",
+        "",
+        None,
+    ],
+)
+def test_concept_mismatch_ignores_questions_without_absent_concepts(question):
+    assert schema_concept_mismatch(question, TITANIC_SCHEMA) == []
+
+
+def test_concept_mismatch_orders_covered_by_order_number_column():
+    assert schema_concept_mismatch(
+        "How many orders were placed after 2013-06-01?", SAMPLE_SCHEMA
+    ) == []
+
+
+def test_concept_mismatch_handles_singular_plural_forms():
+    # 'customer' (Q10 form) and 'client' both trigger the absent 'customers'.
+    assert schema_concept_mismatch("Which client is in Germany?", TITANIC_SCHEMA) == [
+        "clients"
+    ]
+    assert schema_concept_mismatch("Total sales for road bikes", TITANIC_SCHEMA) == [
+        "sales"
+    ]
 
 
 # --------------------------------------------------------------------------

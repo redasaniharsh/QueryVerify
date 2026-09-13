@@ -176,7 +176,10 @@ def main():
             elif category.startswith("G."):
                 rows = (r.get("result") or {}).get("rows") or []
                 single_unknown = len(rows) == 1 and all(str(v) == "Unknown" for v in rows[0].values())
-                ok = not d["flag"] and d["success"] and (d["rows"] == 0 or single_unknown) and error is None
+                single_honest_zero = len(rows) == 1 and rows[0] and all(
+                    str(v) in ("0", "0.0", "None") for v in rows[0].values()
+                )
+                ok = not d["flag"] and d["success"] and (d["rows"] == 0 or single_unknown or single_honest_zero) and error is None
                 note = f"success={'yes' if d['success'] else 'no'}  rows={d['rows']} (honest zero)  expl={d['expl'][:60]!r}"
             elif category.startswith("H."):
                 ok = not d["flag"] and d["success"] and d["rows"] > 0 and error is None

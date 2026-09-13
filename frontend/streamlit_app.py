@@ -550,6 +550,12 @@ if "qv_booted" not in st.session_state:
         raw_sb = raw_sb[0] if raw_sb else None
     if raw_sb is not None and raw_sb in ("0", "1"):
         st.session_state["qv_sb_collapsed"] = raw_sb == "0"
+    # Re-inject sidebar state CSS so the collapsed/hidden rules are applied
+    # after the URL param has been read into session_state.
+    st.markdown(
+        _CSS.replace("__SB_STATE_CSS__", _sidebar_state_css()),
+        unsafe_allow_html=True,
+    )
 
 
 class UserUploadError(Exception):

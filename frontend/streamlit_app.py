@@ -47,8 +47,8 @@ API_URL = os.environ.get("QV_API_URL", "http://127.0.0.1:8000/ask")
 # Bring-your-own-data: uploaded spreadsheets (CSV / Excel .xlsx) are loaded
 # into a NEW, separate SQLite file per browser session
 # (data/user_upload_<session_id>.db). The sample DB is never touched. Files are
-# temporary: replaced on a new upload and swept once they are
-# older than UPLOAD_TTL_SECONDS (the browser tab is the only real lifecycle).
+# temporary: replaced on a new upload and swept once they are older than
+# UPLOAD_TTL_SECONDS (the browser tab is the only real lifecycle).
 _UPLOAD_DIR = Path(__file__).resolve().parent.parent / "data"
 UPLOAD_MAX_BYTES = int(os.environ.get("QV_UPLOAD_MAX_MB", "50")) * 1024 * 1024
 UPLOAD_TTL_SECONDS = int(os.environ.get("QV_UPLOAD_TTL_HOURS", "2")) * 3600
@@ -437,11 +437,25 @@ if "qv_sb_collapsed" not in st.session_state:
     st.session_state["qv_sb_collapsed"] = False
 
 
+def _sync_conversation_url(conv_id):
+    """Keep ?conv=<id> in the URL so a browser reload resumes this conversation.
+
+    session_state does NOT survive a real reload, but the address bar does.
+    Written through st.query_params.from_dict() (a single no-rerun update), so
+    it never causes an extra script run. None clears the parameter (new chat).
+    """
+    params = {k: v for k, v in st.query_params.items() if k != "conv"}
+    if conv_id is not None:
+        params["conv"] = str(conv_id)
+    st.query_params.from_dict(params)
+
+
 def _new_chat():
     st.session_state.conv_id = None
     st.session_state.messages = []
     st.session_state.pop("pending_question", None)
     st.session_state.pop("qv_audio_processed", None)
+    _sync_conversation_url(None)
 
 
 def _open_conversation(conv_id):
@@ -456,6 +470,7 @@ def _open_conversation(conv_id):
     else:
         st.session_state.pop("pending_question", None)
     st.session_state.pop("qv_audio_processed", None)
+    _sync_conversation_url(conv_id)
 
 
 def _persist_message(msg):
@@ -469,6 +484,37 @@ def _persist_message(msg):
         cid = chat_history.create_conversation(title)
         st.session_state.conv_id = cid
     msg["message_id"] = chat_history.save_message(cid, msg)
+    _sync_conversation_url(cid)
+
+
+# --- Resume the last active conversation across a real page reload -------------
+# session_state dies on a hard refresh (Ctrl+Shift+R), but the URL does not.
+# We keep the active conversation id in ?conv=<id> (synced by
+# _sync_conversation_url). On the FIRST run of a fresh session only, restore
+# that conversation instead of landing on a blank "New chat" screen.
+if "qv_booted" not in st.session_state:
+    st.session_state["qv_booted"] = True
+
+    def _resume_cid():
+        raw = st.query_params.get("conv")
+        if isinstance(raw, list):
+            raw = raw[0] if raw else None
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    _rcid = _resume_cid()
+    if _rcid is not None:
+        if chat_history.load_messages(_rcid):
+            _open_conversation(_rcid)
+        else:
+            # Stale link (deleted conversation): drop the parameter, start clean.
+            st.query_params.from_dict(
+                {k: v for k, v in st.query_params.items() if k != "conv"}
+            )
 
 
 class UserUploadError(Exception):

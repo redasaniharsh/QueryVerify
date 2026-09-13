@@ -472,7 +472,7 @@ def _sync_sidebar_url():
     # This preserves any ?conv= that may already be in the URL.
     params = dict(st.query_params)
     if collapsed:
-        params["sb"] = "1"
+        params["sb"] = "0"
     else:
         params.pop("sb", None)
     st.query_params.from_dict(params)
@@ -549,7 +549,7 @@ if "qv_booted" not in st.session_state:
     if isinstance(raw_sb, list):
         raw_sb = raw_sb[0] if raw_sb else None
     if raw_sb is not None and raw_sb in ("0", "1"):
-        st.session_state["qv_sb_collapsed"] = raw_sb == "1"
+        st.session_state["qv_sb_collapsed"] = raw_sb == "0"
 
 
 class UserUploadError(Exception):

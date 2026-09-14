@@ -11,6 +11,7 @@ Later:    LLM_PROVIDER=openai   -> swap to a cloud model for a hosted demo,
 
 import os
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
 
 
@@ -42,6 +43,20 @@ class Settings(BaseSettings):
     # Max rows returned to the UI per query. Queries that return more are
     # truncated with a clear notice (never dropped silently, never hang).
     max_result_rows: int = 25_000
+
+    # Rate limiting: max requests per minute per client IP (default 10)
+    rate_limit_per_minute: int = Field(
+        10,
+        validation_alias=AliasChoices(
+            "qv_rate_limit_per_minute", "rate_limit_per_minute"
+        ),
+    )
+    rate_limit_exempt_loopback: bool = Field(
+        True,
+        validation_alias=AliasChoices(
+            "qv_rate_limit_exempt_loopback", "rate_limit_exempt_loopback"
+        ),
+    )
 
     class Config:
         # QV_ENV_FILE lets a caller swap the config file without touching the

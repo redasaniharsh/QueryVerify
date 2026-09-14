@@ -556,6 +556,10 @@ class UserUploadError(Exception):
     """Raised when an uploaded file fails validation or cannot be loaded."""
 
 
+class RateLimitError(Exception):
+    """Raised when the backend returns HTTP 429 Too Many Requests."""
+
+
 def _sanitize_table_name(name: str) -> str:
     """Filename stem -> a safe SQLite table name (lowercase, [a-z0-9_])."""
     stem = Path(name).stem.lower()
@@ -932,19 +936,35 @@ def _call_backend(question):
     done = threading.Event()
     bucket = {}
     database = _active_database()
+    test_ip = os.environ.get("QV_TEST_RATE_LIMIT_IP")
+    if not test_ip:
+        raw_test_ip = st.query_params.get("test_ip")
+        if isinstance(raw_test_ip, list):
+            test_ip = raw_test_ip[0] if raw_test_ip else None
+        else:
+            test_ip = raw_test_ip
 
     def _post():
         try:
             payload = {"question": question}
             if database:
                 payload["database"] = database
-            resp = requests.post(API_URL, json=payload, timeout=300)
+            headers = {}
+            if test_ip:
+                headers["X-Forwarded-For"] = str(test_ip)
+            resp = requests.post(API_URL, json=payload, headers=headers, timeout=300)
             if resp.status_code != 200:
                 try:
                     detail = resp.json().get("detail", resp.text)
                 except Exception:
                     detail = resp.text
+                if resp.status_code == 429:
+                    raise RateLimitError(
+                        detail
+                        or "Rate limit exceeded — please wait a moment before asking another question."
+                    )
                 raise RuntimeError(f"Backend error ({resp.status_code}): {detail}")
+
             bucket["resp"] = resp
         except Exception as exc:  # network/down server, or a 4xx with detail
             bucket["exc"] = exc
@@ -1186,21 +1206,28 @@ def _render_feedback(msg):
 
 
 def _render_message(msg):
-    role = "assistant" if msg["role"] == "assistant" else "user"
+    kind = msg.get("kind")
+    if kind == "spinner":
+        return
+    role = "assistant" if msg.get("role") == "assistant" else "user"
     avatar = _ASSISTANT_AVATAR if role == "assistant" else _USER_AVATAR
     with st.chat_message(role, avatar=avatar):
-        if msg["kind"] == "user":
-            st.markdown(msg["content"])
-        elif msg["kind"] == "flag":
-            st.markdown(msg["content"])
+        if kind == "user":
+            st.markdown(msg.get("content", ""))
+        elif kind == "flag":
+            st.markdown(msg.get("content", ""))
             st.caption("_You can answer the follow-up below — no need to retype the original question._")
             _render_trace(msg.get("data") or {})
-        elif msg["kind"] == "answer":
-            _render_answer(msg["data"])
+        elif kind == "answer":
+            _render_answer(msg.get("data") or {})
             if (msg.get("data") or {}).get("success") and msg.get("message_id"):
                 _render_feedback(msg)
+        elif kind == "error":
+            st.error(msg.get("content", "An error occurred."))
         else:
-            st.error(msg["content"])
+            content = msg.get("content")
+            if content:
+                st.error(content)
 
 
 for msg in st.session_state.messages:
@@ -1287,6 +1314,16 @@ if prompt:
     with st.chat_message("assistant", avatar=_ASSISTANT_AVATAR):
         try:
             data = _call_backend(full_question)
+        except RateLimitError as exc:
+            err_msg = {
+                "role": "assistant",
+                "kind": "error",
+                "content": str(exc),
+            }
+            st.session_state.messages[msg_index] = err_msg
+            _persist_message(err_msg)
+            st.error(str(exc))
+            st.stop()
         except Exception as exc:
             err_msg = {
                 "role": "assistant",
@@ -1297,6 +1334,7 @@ if prompt:
             _persist_message(err_msg)
             st.error(f"Failed to reach the backend: {exc}")
             st.stop()
+
 
         if data.get("needs_clarification"):
             # Keep the ORIGINAL question so the next chat message is treated as

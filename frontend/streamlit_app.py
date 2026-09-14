@@ -1206,6 +1206,8 @@ def _render_feedback(msg):
 
 
 def _render_message(msg):
+    if not isinstance(msg, dict):
+        return
     kind = msg.get("kind")
     if kind == "spinner":
         return
@@ -1309,7 +1311,9 @@ if prompt:
     with st.chat_message("user", avatar=_USER_AVATAR):
         st.markdown(display)
 
-    st.session_state.messages.append({"role": "assistant", "kind": "spinner"})
+    st.session_state.messages.append(
+        {"role": "assistant", "kind": "spinner", "content": ""}
+    )
     msg_index = len(st.session_state.messages) - 1
     with st.chat_message("assistant", avatar=_ASSISTANT_AVATAR):
         try:

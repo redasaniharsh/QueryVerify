@@ -196,7 +196,7 @@ def _payload_to_message(row: sqlite3.Row) -> dict:
         msg = json.loads(row["payload"])
     except (TypeError, ValueError):
         msg = None
-    if msg is None:
+    if not isinstance(msg, dict):
         kind = row["kind"]
         if kind == "answer":
             msg = {
@@ -211,7 +211,11 @@ def _payload_to_message(row: sqlite3.Row) -> dict:
                 },
             }
         else:
-            msg = {"role": row["role"], "kind": kind, "content": row["content"]}
+            msg = {"role": row["role"], "kind": kind, "content": row["content"] or ""}
+    msg.setdefault("role", row["role"] or "assistant")
+    msg.setdefault("kind", row["kind"] or "")
+    if msg["kind"] != "answer" and "content" not in msg:
+        msg["content"] = row["content"] or ""
     msg["message_id"] = row["id"]
     msg["feedback"] = row["feedback"]
     return msg

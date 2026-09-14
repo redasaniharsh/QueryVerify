@@ -936,13 +936,15 @@ def _call_backend(question):
     done = threading.Event()
     bucket = {}
     database = _active_database()
-    test_ip = os.environ.get("QV_TEST_RATE_LIMIT_IP")
-    if not test_ip:
-        raw_test_ip = st.query_params.get("test_ip")
-        if isinstance(raw_test_ip, list):
-            test_ip = raw_test_ip[0] if raw_test_ip else None
-        else:
-            test_ip = raw_test_ip
+
+    # Testing-only client IP override: strictly server-side and disabled by default.
+    # The ?test_ip= URL parameter was removed to prevent clients from spoofing IPs
+    # or bypassing rate limits.
+    test_ip = (
+        os.environ.get("QV_TEST_RATE_LIMIT_IP")
+        if os.environ.get("QV_ENABLE_TEST_IP") == "1"
+        else None
+    )
 
     def _post():
         try:

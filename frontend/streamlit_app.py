@@ -39,6 +39,7 @@ if str(_FRONTEND_DIR) not in sys.path:
 import chat_history  # local module: SQLite persistence for conversations
 import upload_profiler  # local module: data-driven PK/FK detection for uploads
 import upload_loader  # local module: CSV / Excel (.xlsx) parsing for uploads
+import starter_questions  # local module: schema-aware example questions for empty chat
 
 st.set_page_config(page_title="QueryVerify", layout="centered")
 
@@ -412,6 +413,55 @@ _CSS = """
   [data-testid="stForm"]{
     width:min(440px, calc(100vw - 336px));
     transform:translateX(calc(-50% + 150px));}
+}
+/* ---------- starter question cards ---------- */
+.starter-hint{
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--qv-muted);
+  letter-spacing: 0.2px;
+  margin: 22px 0 14px 2px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+[class*="st-key-qv_starter_"]{
+  margin-bottom: 8px;
+}
+[class*="st-key-qv_starter_"] button{
+  width: 100% !important;
+  min-height: 52px !important;
+  height: auto !important;
+  padding: 12px 15px !important;
+  background: var(--qv-bubble) !important;
+  border: 1px solid var(--qv-border) !important;
+  border-radius: 12px !important;
+  color: var(--qv-text) !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  line-height: 1.4 !important;
+  text-align: left !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  box-shadow: 0 4px 12px rgba(0,0,0,.22) !important;
+  transition: all .2s cubic-bezier(.16,1,.3,1) !important;
+}
+[class*="st-key-qv_starter_"] button p{
+  margin: 0 !important;
+  text-align: left !important;
+  white-space: normal !important;
+  word-break: break-word !important;
+}
+[class*="st-key-qv_starter_"] button:hover{
+  background: rgba(30,41,64,.95) !important;
+  border-color: rgba(96,165,250,.45) !important;
+  color: #fff !important;
+  transform: translateY(-2px) !important;
+  box-shadow: 0 8px 20px rgba(0,0,0,.35), 0 0 12px rgba(59,130,246,.2) !important;
+}
+[class*="st-key-qv_starter_"] button:active{
+  transform: translateY(0) !important;
 }
 __SB_STATE_CSS__
 </style>
@@ -1237,6 +1287,26 @@ def _render_message(msg):
 for msg in st.session_state.messages:
     _render_message(msg)
 
+starter_clicked = None
+if not st.session_state.messages:
+    _schema_tables = starter_questions.get_active_schema_tables(
+        db_mode=st.session_state.get("qv_db_mode"),
+        upload_db_path=st.session_state.get("qv_db_path"),
+        upload_schema=st.session_state.get("qv_db_schema"),
+    )
+    _starters = starter_questions.generate_starter_questions(_schema_tables)
+    if _starters:
+        st.markdown(
+            '<div class="starter-hint">💡 <b>Suggested questions</b> to get started:</div>',
+            unsafe_allow_html=True,
+        )
+        c1, c2 = st.columns(2, gap="small")
+        for idx, q_text in enumerate(_starters):
+            col = c1 if idx % 2 == 0 else c2
+            with col:
+                if st.button(q_text, key=f"qv_starter_{idx}", use_container_width=True):
+                    starter_clicked = q_text
+
 # --- Chat input: one continuous pill bar (text + mic + send). The form owns
 # the text field + send button; the audio recorder is a separate widget OUTSIDE
 # the form (so a finished recording reruns the script and is processed on its
@@ -1261,6 +1331,8 @@ audio_file = st.audio_input(
 
 if prompt:
     pass  # typed question; nothing extra to do
+elif starter_clicked:
+    prompt = starter_clicked
 elif audio_file is not None:
     # Transcribe the recorded audio once (fingerprinted on content so reruns
     # of the same recording never re-transcribe), then feed the transcript

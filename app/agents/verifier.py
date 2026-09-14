@@ -104,6 +104,39 @@ Respond in strict JSON only, no other text:
 
 JSON_RE = re.compile(r"\{[^{}]*\}")
 
+
+def parse_verifier_json(raw: str):
+    """Parse the verifier's "Answer:" JSON, recovering small model slips.
+
+    Small reasoning models sometimes close a JSON string with a single quote
+    right before the closing brace ({{...value'}}) instead of a double quote
+    ({{...value"}}), which makes both json.loads(raw) and JSON_RE + loads fail.
+    When the object text ends with '}} exactly at the string terminator, the
+    single quote is replaced with a double quote and the parse is retried, so
+    a verifier that actually accepted the result still says so instead of
+    failing us into a repair loop.
+    """
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    match = JSON_RE.search(raw)
+    if not match:
+        return None
+    text = match.group()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    if text.endswith("'}"):
+        try:
+            return json.loads(text[:-2] + '"}' )
+        except json.JSONDecodeError:
+            return None
+    return None
+
 _AGGREGATE_RE = re.compile(
     r"\b(?:how many|total|sum|average|avg|mean|count|min(?:imum)?|max(?:imum)?)\b",
     re.IGNORECASE,
@@ -208,16 +241,8 @@ def verify_result(question: str, sql: str, result: dict) -> dict:
         # loop as error_feedback instead of crashing the request.
         return {"matches": False, "reason": f"Verifier timed out: {exc}"}
 
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        pass
-
-    match = JSON_RE.search(raw)
-    if match:
-        try:
-            return json.loads(match.group())
-        except json.JSONDecodeError:
-            pass
+    parsed = parse_verifier_json(raw)
+    if parsed is not None:
+        return parsed
 
     return {"matches": False, "reason": "could not parse verifier response"}

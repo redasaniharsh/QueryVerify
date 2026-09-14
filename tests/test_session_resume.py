@@ -97,3 +97,69 @@ def test_stale_conversation_link_falls_back_to_clean_chat(isolated_db):
     assert at.session_state["conv_id"] is None
     assert at.session_state["messages"] == []
     assert "conv" not in at.query_params
+
+
+def test_sidebar_collapse_persists_on_reload_and_reopens():
+    # 1. Boot without sb -> expanded by default, no reopen button
+    at = AppTest.from_file(APP_PATH, default_timeout=180)
+    at.run()
+    assert not at.exception
+    assert at.session_state["qv_sb_collapsed"] is False
+    assert "sb" not in at.query_params
+    assert not [b for b in at.button if b.key == "qv_sb_open"]
+
+    # 2. Click collapse button -> sets sb=0 and renders reopen button
+    collapse_btns = [b for b in at.button if b.key == "qv_sb_collapse"]
+    assert len(collapse_btns) == 1
+    collapse_btns[0].click()
+    at.run()
+    assert not at.exception
+    assert at.session_state["qv_sb_collapsed"] is True
+    assert at.query_params.get("sb") == ["0"]
+
+    # 3. Simulate page reload with ?sb=0 -> must boot collapsed with reopen button
+    at_reload = AppTest.from_file(APP_PATH, default_timeout=180)
+    at_reload.query_params = {"sb": "0"}
+    at_reload.run()
+    assert not at_reload.exception
+    assert at_reload.session_state["qv_sb_collapsed"] is True
+    open_btns = [b for b in at_reload.button if b.key == "qv_sb_open"]
+    assert len(open_btns) == 1, "Floating reopen button must render on reload when collapsed"
+
+    # 4. Click reopen button -> expands and removes sb from query_params
+    open_btns[0].click()
+    at_reload.run()
+    assert not at_reload.exception
+    assert at_reload.session_state["qv_sb_collapsed"] is False
+    assert "sb" not in at_reload.query_params
+
+
+def test_sidebar_and_conversation_coexist(isolated_db):
+    # Create conversation and collapse sidebar
+    at = AppTest.from_file(APP_PATH, default_timeout=180)
+    at.run()
+    _ask(at, TEST_Q)
+    conv_id = at.session_state["conv_id"]
+    assert conv_id is not None
+    assert at.query_params.get("conv") == [str(conv_id)]
+
+    # Collapse sidebar -> both conv and sb must coexist in query params
+    collapse_btns = [b for b in at.button if b.key == "qv_sb_collapse"]
+    assert len(collapse_btns) == 1
+    collapse_btns[0].click()
+    at.run()
+    assert not at.exception
+    assert at.query_params.get("conv") == [str(conv_id)]
+    assert at.query_params.get("sb") == ["0"]
+
+    # Reload with both params -> both restored
+    at_reload = AppTest.from_file(APP_PATH, default_timeout=180)
+    at_reload.query_params = {"conv": str(conv_id), "sb": "0"}
+    at_reload.run()
+    assert not at_reload.exception
+    assert at_reload.session_state["conv_id"] == conv_id
+    assert at_reload.session_state["qv_sb_collapsed"] is True
+    assert at_reload.query_params.get("conv") == [str(conv_id)]
+    assert at_reload.query_params.get("sb") == ["0"]
+    open_btns = [b for b in at_reload.button if b.key == "qv_sb_open"]
+    assert len(open_btns) == 1

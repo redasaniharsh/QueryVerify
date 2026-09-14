@@ -40,6 +40,56 @@ import chat_history  # local module: SQLite persistence for conversations
 import upload_profiler  # local module: data-driven PK/FK detection for uploads
 import upload_loader  # local module: CSV / Excel (.xlsx) parsing for uploads
 
+st.set_page_config(page_title="QueryVerify", layout="centered")
+
+# ---- Restore sidebar collapse state from URL ?sb=0 before ANY rendering ----
+if "qv_sb_collapsed" not in st.session_state:
+    raw_sb = st.query_params.get("sb")
+    if isinstance(raw_sb, list):
+        raw_sb = raw_sb[0] if raw_sb else None
+    if raw_sb is not None and raw_sb in ("0", "1"):
+        st.session_state["qv_sb_collapsed"] = (raw_sb == "0")
+    else:
+        st.session_state["qv_sb_collapsed"] = False
+
+
+def _sync_conversation_url(conv_id):
+    """Keep ?conv=<id> in the URL so a browser reload resumes this conversation.
+
+    session_state does NOT survive a real reload, but the address bar does.
+    Written through st.query_params.from_dict() (a single no-rerun update), so
+    it never causes an extra script run. None clears the parameter (new chat).
+
+    Key: explicitly preserve any existing query parameters (e.g. ?sb=) so
+    neither wipes the other.
+    """
+    params = dict(st.query_params)
+    if conv_id is not None:
+        params["conv"] = str(conv_id)
+    else:
+        params.pop("conv", None)
+    st.query_params.from_dict(params)
+
+
+def _sync_sidebar_url():
+    """Keep ?sb=0 in the URL so a browser reload restores the collapsed sidebar state.
+
+    session_state does NOT survive a real reload, but the address bar does.
+    Written through st.query_params.from_dict() (a single no-rerun update), so
+    it never causes an extra script run.
+
+    Key: explicitly preserve any existing query parameters (e.g. ?conv=) so
+    neither wipes the other.
+    """
+    collapsed = st.session_state.get("qv_sb_collapsed", False)
+    params = dict(st.query_params)
+    if collapsed:
+        params["sb"] = "0"
+    else:
+        params.pop("sb", None)
+    st.query_params.from_dict(params)
+
+
 # Backend endpoint. Overridable (QV_API_URL) so the containerized frontend can
 # reach the backend service by Docker DNS name (http://backend:8000/ask).
 API_URL = os.environ.get("QV_API_URL", "http://127.0.0.1:8000/ask")
@@ -385,8 +435,6 @@ def _sidebar_state_css() -> str:
     return ""
 
 
-st.set_page_config(page_title="QueryVerify", layout="centered")
-
 st.markdown(
     _CSS.replace("__SB_STATE_CSS__", _sidebar_state_css()),
     unsafe_allow_html=True,
@@ -413,6 +461,7 @@ if st.session_state.get("qv_sb_collapsed"):
         help="Expand sidebar",
     ):
         st.session_state["qv_sb_collapsed"] = False
+        _sync_sidebar_url()
         st.rerun()
 
 chat_history.init_db()
@@ -433,21 +482,7 @@ if "qv_upload_sig" not in st.session_state:
     st.session_state["qv_upload_sig"] = None
 if "qv_db_profile" not in st.session_state:
     st.session_state["qv_db_profile"] = None
-if "qv_sb_collapsed" not in st.session_state:
-    st.session_state["qv_sb_collapsed"] = False
 
-
-def _sync_conversation_url(conv_id):
-    """Keep ?conv=<id> in the URL so a browser reload resumes this conversation.
-
-    session_state does NOT survive a real reload, but the address bar does.
-    Written through st.query_params.from_dict() (a single no-rerun update), so
-    it never causes an extra script run. None clears the parameter (new chat).
-    """
-    params = {k: v for k, v in st.query_params.items() if k != "conv"}
-    if conv_id is not None:
-        params["conv"] = str(conv_id)
-    st.query_params.from_dict(params)
 
 
 def _new_chat():
@@ -512,9 +547,9 @@ if "qv_booted" not in st.session_state:
             _open_conversation(_rcid)
         else:
             # Stale link (deleted conversation): drop the parameter, start clean.
-            st.query_params.from_dict(
-                {k: v for k, v in st.query_params.items() if k != "conv"}
-            )
+            params = dict(st.query_params)
+            params.pop("conv", None)
+            st.query_params.from_dict(params)
 
 
 class UserUploadError(Exception):
@@ -679,6 +714,7 @@ with st.sidebar:
     with _sb_header[1]:
         if st.button("«", key="qv_sb_collapse", help="Collapse sidebar"):
             st.session_state["qv_sb_collapsed"] = True
+            _sync_sidebar_url()
             st.rerun()
     if st.button("＋ New chat", key="qv_new_chat", use_container_width=True):
         _new_chat()
